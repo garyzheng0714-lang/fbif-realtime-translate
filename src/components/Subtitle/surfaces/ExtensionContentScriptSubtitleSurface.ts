@@ -3,14 +3,10 @@ import useSettingsStore from '../../../stores/settingsStore';
 
 declare const chrome: any;
 
+// FBIF fork: 只服务视频/直播场景，移除上游全部会议站点
 const SUPPORTED_HOSTS = new Set([
-  'meet.google.com',
-  'teams.live.com', 'teams.microsoft.com', 'teams.cloud.microsoft',
-  'app.zoom.us',
-  'app.gather.town', 'app.v2.gather.town',
-  'whereby.com',
-  'discord.com',
-  'app.slack.com',
+  'www.youtube.com', 'm.youtube.com',
+  'www.bilibili.com', 'live.bilibili.com',
 ]);
 
 function isSupportedUrl(url: string | undefined): boolean {

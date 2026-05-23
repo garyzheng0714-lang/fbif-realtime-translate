@@ -25,17 +25,12 @@ const DEFAULT_CONFIG = {
 
 // Define sites where the side panel should be enabled
 // You can modify this array to include any domains you want
+// FBIF fork: 只服务视频/直播场景，移除上游全部会议站点
 const ENABLED_SITES = [
-  'meet.google.com',
-  'teams.live.com',
-  'teams.microsoft.com',
-  'teams.cloud.microsoft',
-  'app.zoom.us',
-  'app.gather.town',
-  'app.v2.gather.town',
-  'whereby.com',
-  'discord.com',
-  'slack.com'
+  'www.youtube.com',
+  'm.youtube.com',
+  'www.bilibili.com',
+  'live.bilibili.com'
 ];
 
 // Track which tabs have the side panel open

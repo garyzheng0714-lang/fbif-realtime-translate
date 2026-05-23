@@ -97,7 +97,9 @@ const useAudioStore = create<AudioStore>()(
     // System audio capture state
     systemAudioSources: [],
     selectedSystemAudioSource: null,
-    isSystemAudioCaptureEnabled: false,
+    // FBIF fork: 视频/直播场景默认开，启动会话即弹 tabCapture 权限框；
+    // 用户曾手动 toggle 过的值会从 chrome.storage 覆盖此默认值（见 line 374）
+    isSystemAudioCaptureEnabled: true,
     isSystemAudioCaptureActive: false,
     isSystemAudioSourceReady: false,
     participantAudioOutputDevice: null,

@@ -32,12 +32,11 @@
     "declarativeNetRequest"
   ],
   "host_permissions": [
-    "https://sokuji-api.kizuna.ai/*",
-    "https://sokuji.kizuna.ai/*",
     "wss://openspeech.bytedance.com/*",
-    "https://speech.platform.bing.com/*",
-    "wss://speech.platform.bing.com/*",
-    "https://www.bing.com/*"
+    "https://www.youtube.com/*",
+    "https://m.youtube.com/*",
+    "https://www.bilibili.com/*",
+    "https://live.bilibili.com/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -45,18 +44,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://meet.google.com/*", "https://teams.live.com/*", "https://teams.microsoft.com/*", "https://teams.cloud.microsoft/*", "https://app.gather.town/*", "https://app.v2.gather.town/*", "https://whereby.com/*", "https://discord.com/*", "https://app.slack.com/*"],
-      "js": ["content.js", "subtitle-overlay-content.js"],
-      "run_at": "document_start"
-    },
-    {
-      "matches": ["https://app.zoom.us/*"],
-      "js": ["zoom-content.js"],
-      "run_at": "document_start",
-      "all_frames": true
-    },
-    {
-      "matches": ["https://app.zoom.us/*"],
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*", "https://www.bilibili.com/*", "https://live.bilibili.com/*"],
       "js": ["subtitle-overlay-content.js"],
       "run_at": "document_idle"
     }
@@ -84,16 +72,10 @@
     {
       "resources": ["subtitle-overlay.html", "subtitle-overlay.js", "assets/*"],
       "matches": [
-        "https://meet.google.com/*",
-        "https://teams.live.com/*",
-        "https://teams.microsoft.com/*",
-        "https://teams.cloud.microsoft/*",
-        "https://app.zoom.us/*",
-        "https://app.gather.town/*",
-        "https://app.v2.gather.town/*",
-        "https://whereby.com/*",
-        "https://discord.com/*",
-        "https://app.slack.com/*"
+        "https://www.youtube.com/*",
+        "https://m.youtube.com/*",
+        "https://www.bilibili.com/*",
+        "https://live.bilibili.com/*"
       ]
     }
   ],
