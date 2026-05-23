@@ -344,9 +344,11 @@ function generateSitesList() {
       const pills = group.sites.map(s =>
         `<span class="site-group-pill" data-url="${s.domain}" title="${s.domain}">${s.label}</span>`
       ).join('');
+      // CSP prohibits inline event handlers; hide icon directly when src is empty
+      const groupImgStyle = group.icon ? '' : ' style="display:none"';
       return `
         <li class="site-item site-item-grouped" title="${tooltipText}">
-          <img src="${group.icon}" alt="${group.shortName}" class="site-icon" onerror="this.style.display='none'">
+          <img src="${group.icon}" alt="${group.shortName}" class="site-icon"${groupImgStyle}>
           <div class="site-info">
             <div class="site-name">${group.shortName}</div>
             <div class="site-group-pills">${pills}</div>
@@ -355,9 +357,11 @@ function generateSitesList() {
       `;
     }
     const tooltipText = `${info.name}\n${site}`;
+    // CSP prohibits inline event handlers; hide icon directly when src is empty
+    const imgStyle = info.icon ? '' : ' style="display:none"';
     return `
       <li class="site-item" title="${tooltipText}">
-        <img src="${info.icon}" alt="${info.name}" class="site-icon" onerror="this.style.display='none'">
+        <img src="${info.icon}" alt="${info.name}" class="site-icon"${imgStyle}>
         <div class="site-info">
           <div class="site-name">${info.shortName}</div>
           <div class="site-url">${site}</div>
