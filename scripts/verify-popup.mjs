@@ -40,3 +40,4 @@ console.log('--- errors ---');
 console.log(JSON.stringify(errors, null, 2));
 
 await ctx.close();
+process.exit(errors.length > 0 ? 1 : 0);

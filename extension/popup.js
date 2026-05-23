@@ -326,6 +326,7 @@ function showErrorState() {
 }
 
 // Helper function to generate sites list HTML
+// CSP prohibits inline event handlers; hide icon directly when src is empty
 function generateSitesList() {
   const renderedGroups = new Set();
   return ENABLED_SITES.map(site => {
@@ -339,7 +340,6 @@ function generateSitesList() {
       const pills = group.sites.map(s =>
         `<span class="site-group-pill" data-url="${s.domain}" title="${s.domain}">${s.label}</span>`
       ).join('');
-      // CSP prohibits inline event handlers; hide icon directly when src is empty
       const groupImgStyle = group.icon ? '' : ' style="display:none"';
       return `
         <li class="site-item site-item-grouped" title="${tooltipText}">
@@ -352,7 +352,6 @@ function generateSitesList() {
       `;
     }
     const tooltipText = `${info.name}\n${site}`;
-    // CSP prohibits inline event handlers; hide icon directly when src is empty
     const imgStyle = info.icon ? '' : ' style="display:none"';
     return `
       <li class="site-item" title="${tooltipText}">
