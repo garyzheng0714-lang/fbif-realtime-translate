@@ -166,11 +166,6 @@ function getStoreInfo() {
   }
 }
 
-// Helper function to generate icon style attribute
-function getIconStyle(info) {
-  return info.iconBg ? `style="background-color: ${info.iconBg}; border-radius: 8px; padding: 4px;"` : '';
-}
-
 // Initialize popup when DOM is loaded
 document.addEventListener('DOMContentLoaded', async () => {
   try {
