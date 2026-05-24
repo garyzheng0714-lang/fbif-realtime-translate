@@ -891,6 +891,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   const timelineQueuedCueIdsRef = useRef<Set<string>>(new Set());
   const timelineLastVideoTimeMsRef = useRef<number | null>(null);
   const timelineStopRef = useRef<boolean>(false);
+  const timelineSessionGenerationRef = useRef<number>(0);
   const timelineTickTimeoutRef = useRef<number | null>(null);
 
   // Reference to track push-to-talk duration
@@ -1184,12 +1185,23 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     const tickMs = 350;
     const prebufferMs = 10_000;
     const smallLeadMs = 150;
+    const maxLateStartMs = 750;
+    const minRemainingCueMs = 600;
     const seekThresholdMs = 2_000;
     const timelineTrackId = 'video-timeline-assistant';
+    const switchedVideoMessage = '视频已切换，请重新开始同步翻译';
+    const generation = timelineSessionGenerationRef.current + 1;
+    timelineSessionGenerationRef.current = generation;
+
+    const isTimelineSessionActive = () => (
+      generation === timelineSessionGenerationRef.current && !timelineStopRef.current
+    );
 
     const failTimeline = (error: unknown) => {
+      if (generation !== timelineSessionGenerationRef.current) return;
       const message = error instanceof Error ? error.message : 'Timeline session failed';
       timelineStopRef.current = true;
+      timelineSessionGenerationRef.current += 1;
       setTimelineError(message);
       addRealtimeEvent(
         { type: 'session.init_error', data: { message, error: String(error) } },
@@ -1212,117 +1224,147 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       }
 
       const response = await requestCaptions();
+      if (!isTimelineSessionActive()) return;
       setTimelineCaptionsReady(response);
       timelineTtsRef.current = new TimelineTts();
       setIsSessionActive(true);
 
-    const prepareCueAudio = async (cue: TimelineCue) => {
-      if (
-        timelineStopRef.current ||
-        timelinePreparedAudioRef.current.has(cue.id) ||
-        timelineGeneratingCueIdsRef.current.has(cue.id) ||
-        timelineQueuedCueIdsRef.current.has(cue.id)
-      ) {
-        return;
-      }
-
-      timelineGeneratingCueIdsRef.current.add(cue.id);
-      const chunks: Int16Array[] = [];
-
-      try {
-        if (!timelineTtsRef.current) {
-          timelineTtsRef.current = new TimelineTts();
-        }
-        const tts = timelineTtsRef.current;
-        await tts.generateChinese(cue.translatedText ?? cue.sourceText, (chunk) => {
-          chunks.push(chunk.samples);
-        });
-
-        if (!timelineStopRef.current && chunks.length > 0) {
-          timelinePreparedAudioRef.current.set(cue.id, { cue, chunks });
-        }
-      } catch (error) {
-        if (error instanceof Error && error.message === 'Timeline TTS disposed') {
+      const prepareCueAudio = async (cue: TimelineCue) => {
+        if (
+          !isTimelineSessionActive() ||
+          timelinePreparedAudioRef.current.has(cue.id) ||
+          timelineGeneratingCueIdsRef.current.has(cue.id) ||
+          timelineQueuedCueIdsRef.current.has(cue.id)
+        ) {
           return;
         }
-        if (!timelineStopRef.current) {
-          throw error;
-        }
-      } finally {
-        timelineGeneratingCueIdsRef.current.delete(cue.id);
-      }
-    };
 
-    const resetAfterSeek = () => {
-      audioServiceRef.current?.clearStreamingTrack(timelineTrackId);
-      timelinePreparedAudioRef.current.clear();
-      timelineGeneratingCueIdsRef.current.clear();
-      timelineQueuedCueIdsRef.current.clear();
-      timelineTtsRef.current?.dispose();
-      timelineTtsRef.current = new TimelineTts();
-    };
+        timelineGeneratingCueIdsRef.current.add(cue.id);
+        const chunks: Int16Array[] = [];
 
-    const scheduleTick = (tick: () => Promise<void>) => {
-      if (timelineStopRef.current) return;
-      timelineTickTimeoutRef.current = window.setTimeout(() => {
-        tick().catch(failTimeline);
-      }, tickMs);
-    };
+        try {
+          if (!timelineTtsRef.current) {
+            timelineTtsRef.current = new TimelineTts();
+          }
+          const tts = timelineTtsRef.current;
+          await tts.generateChinese(cue.translatedText ?? cue.sourceText, (chunk) => {
+            if (!isTimelineSessionActive()) return;
+            chunks.push(chunk.samples);
+          });
 
-    const tick = async (): Promise<void> => {
-      const videoTime = await requestYouTubeVideoTimeFromActiveTab();
-      if (timelineStopRef.current) return;
-
-      const currentTimeMs = videoTime.currentTimeMs;
-      const lastVideoTimeMs = timelineLastVideoTimeMsRef.current;
-      if (lastVideoTimeMs !== null && Math.abs(currentTimeMs - lastVideoTimeMs) > seekThresholdMs) {
-        resetAfterSeek();
-      }
-      timelineLastVideoTimeMsRef.current = currentTimeMs;
-
-      const activeCue = getActiveCue(response.cues, currentTimeMs);
-      setTimelinePlaying(activeCue?.id ?? null);
-
-      for (const [cueId, prepared] of timelinePreparedAudioRef.current) {
-        if (prepared.cue.endMs <= currentTimeMs) {
-          timelinePreparedAudioRef.current.delete(cueId);
-        }
-      }
-
-      const cueWindow = getCueWindow(response.cues, currentTimeMs, prebufferMs);
-      for (const cue of cueWindow) {
-        prepareCueAudio(cue).catch(failTimeline);
-      }
-
-      if (!videoTime.paused) {
-        for (const cue of cueWindow) {
           if (
-            timelineQueuedCueIdsRef.current.has(cue.id) ||
-            cue.startMs > currentTimeMs + smallLeadMs ||
-            cue.endMs <= currentTimeMs
+            isTimelineSessionActive() &&
+            !timelineQueuedCueIdsRef.current.has(cue.id) &&
+            chunks.length > 0
           ) {
-            continue;
+            timelinePreparedAudioRef.current.set(cue.id, { cue, chunks });
           }
-
-          const prepared = timelinePreparedAudioRef.current.get(cue.id);
-          if (!prepared) continue;
-
-          timelineQueuedCueIdsRef.current.add(cue.id);
-          timelinePreparedAudioRef.current.delete(cue.id);
-          for (const chunk of prepared.chunks) {
-            audioServiceRef.current?.addAudioData(chunk, timelineTrackId, true, {
-              itemId: cue.id,
-              cueId: cue.id,
-              startMs: cue.startMs,
-              endMs: cue.endMs,
-              sourceText: cue.sourceText,
-            });
+        } catch (error) {
+          if (error instanceof Error && error.message === 'Timeline TTS disposed') {
+            return;
+          }
+          if (isTimelineSessionActive()) {
+            throw error;
+          }
+        } finally {
+          if (generation === timelineSessionGenerationRef.current) {
+            timelineGeneratingCueIdsRef.current.delete(cue.id);
           }
         }
-      }
+      };
 
-      scheduleTick(tick);
-    };
+      const resetAfterSeek = () => {
+        if (!isTimelineSessionActive()) return;
+        audioServiceRef.current?.clearStreamingTrack(timelineTrackId);
+        timelinePreparedAudioRef.current.clear();
+        timelineGeneratingCueIdsRef.current.clear();
+        timelineQueuedCueIdsRef.current.clear();
+        timelineTtsRef.current?.dispose();
+        timelineTtsRef.current = new TimelineTts();
+      };
+
+      const scheduleTick = (tick: () => Promise<void>) => {
+        if (!isTimelineSessionActive()) return;
+        timelineTickTimeoutRef.current = window.setTimeout(() => {
+          if (!isTimelineSessionActive()) return;
+          tick().catch(failTimeline);
+        }, tickMs);
+      };
+
+      const tick = async (): Promise<void> => {
+        const videoTime = await requestYouTubeVideoTimeFromActiveTab();
+        if (!isTimelineSessionActive()) return;
+
+        if (videoTime.videoId !== response.videoId) {
+          failTimeline(new Error(switchedVideoMessage));
+          return;
+        }
+
+        const currentTimeMs = videoTime.currentTimeMs;
+        const lastVideoTimeMs = timelineLastVideoTimeMsRef.current;
+        if (lastVideoTimeMs !== null && Math.abs(currentTimeMs - lastVideoTimeMs) > seekThresholdMs) {
+          resetAfterSeek();
+        }
+        timelineLastVideoTimeMsRef.current = currentTimeMs;
+
+        const activeCue = getActiveCue(response.cues, currentTimeMs);
+        setTimelinePlaying(activeCue?.id ?? null);
+
+        for (const [cueId, prepared] of timelinePreparedAudioRef.current) {
+          if (prepared.cue.endMs <= currentTimeMs) {
+            timelinePreparedAudioRef.current.delete(cueId);
+          }
+        }
+
+        const cueWindow = getCueWindow(response.cues, currentTimeMs, prebufferMs);
+        for (const cue of cueWindow) {
+          prepareCueAudio(cue).catch((error) => {
+            if (generation !== timelineSessionGenerationRef.current) return;
+            if (error instanceof Error && error.message === 'Timeline TTS disposed') return;
+            failTimeline(error);
+          });
+        }
+
+        if (!videoTime.paused) {
+          for (const cue of cueWindow) {
+            if (!isTimelineSessionActive()) return;
+
+            const missedStartWindow = currentTimeMs > cue.startMs + maxLateStartMs;
+            const tooLittleRemaining = cue.endMs - currentTimeMs < minRemainingCueMs;
+            if (missedStartWindow || tooLittleRemaining) {
+              timelinePreparedAudioRef.current.delete(cue.id);
+              timelineQueuedCueIdsRef.current.add(cue.id);
+              continue;
+            }
+
+            if (
+              timelineQueuedCueIdsRef.current.has(cue.id) ||
+              cue.startMs > currentTimeMs + smallLeadMs ||
+              cue.endMs <= currentTimeMs
+            ) {
+              continue;
+            }
+
+            const prepared = timelinePreparedAudioRef.current.get(cue.id);
+            if (!prepared) continue;
+
+            timelineQueuedCueIdsRef.current.add(cue.id);
+            timelinePreparedAudioRef.current.delete(cue.id);
+            for (const chunk of prepared.chunks) {
+              if (!isTimelineSessionActive()) return;
+              audioServiceRef.current?.addAudioData(chunk, timelineTrackId, true, {
+                itemId: cue.id,
+                cueId: cue.id,
+                startMs: cue.startMs,
+                endMs: cue.endMs,
+                sourceText: cue.sourceText,
+              });
+            }
+          }
+        }
+
+        scheduleTick(tick);
+      };
 
       await tick();
     } catch (error) {
@@ -1361,6 +1403,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       setIsAIResponding(false);
       setIsUsingWebRTC(false);
       pendingTextRef.current = null;
+      timelineSessionGenerationRef.current += 1;
       timelineStopRef.current = true;
       resetTimelineAudioRuntime();
       useTimelineStore.getState().resetTimeline();
