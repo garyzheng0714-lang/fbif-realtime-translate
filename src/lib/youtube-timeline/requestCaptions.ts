@@ -135,7 +135,7 @@ function sendCaptionRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, tab
 }
 
 function getResponseError(response: Record<string, unknown>): { code: TimelineErrorCode; message: string } | null {
-  if (response.success !== false) return null;
+  if (response.ok !== false && response.success !== false) return null;
   const error = response.error;
   const code = isRecord(error) && isTimelineErrorCode(error.code)
     ? error.code
@@ -170,20 +170,21 @@ function parseTimelineResponse(response: unknown, tab: ChromeTab, fallbackVideoI
     throw createTimelineError(responseError.code, responseError.message);
   }
 
-  const payload = response.json3 ?? response.captionJson3 ?? response.payload ?? response.captions ?? response;
-  const cues = parseYouTubeJson3(payload);
+  const payload = isRecord(response.payload) ? response.payload : response;
+  const json3 = response.ok === true ? payload.json3 : response.json3 ?? response.captionJson3 ?? response.captions ?? response;
+  const cues = parseYouTubeJson3(json3);
   if (cues.length === 0) {
     throw createTimelineError('caption_parse_failed', 'No usable caption cues were parsed');
   }
 
-  const tracks = Array.isArray(response.tracks) ? response.tracks.filter(isCaptionTrack) : [];
-  const sourceLanguage = typeof response.sourceLanguage === 'string'
-    ? response.sourceLanguage
+  const tracks = Array.isArray(payload.tracks) ? payload.tracks.filter(isCaptionTrack) : [];
+  const sourceLanguage = typeof payload.sourceLanguage === 'string'
+    ? payload.sourceLanguage
     : tracks[0]?.languageCode ?? '';
 
   return {
-    videoId: typeof response.videoId === 'string' ? response.videoId : fallbackVideoId,
-    title: typeof response.title === 'string' ? response.title : tab.title ?? '',
+    videoId: typeof payload.videoId === 'string' ? payload.videoId : fallbackVideoId,
+    title: typeof payload.title === 'string' ? payload.title : tab.title ?? '',
     sourceLanguage,
     tracks,
     cues,
