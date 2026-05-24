@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   requestCaptions,
+  setYouTubeOriginalAudioMutedInTab,
   setYouTubeOriginalAudioMutedFromActiveTab,
   requestYouTubeVideoTimeFromActiveTab,
   YOUTUBE_TIMELINE_CAPTION_REQUEST,
@@ -151,6 +152,7 @@ describe('requestCaptions', () => {
       payload: {
         previousMuted: false,
         currentMuted: true,
+        videoId: 'video-123',
       },
     });
 
@@ -158,12 +160,40 @@ describe('requestCaptions', () => {
 
     expect(sendMessage).toHaveBeenCalledWith(
       activeYouTubeTab.id,
-      { type: YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST, muted: true },
+      { type: YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST, muted: true, videoId: 'video-123' },
       expect.any(Function),
     );
     expect(result).toEqual({
+      tabId: activeYouTubeTab.id,
+      videoId: 'video-123',
       previousMuted: false,
       currentMuted: true,
+    });
+  });
+
+  it('restores original audio in the specified tab without querying the active tab', async () => {
+    const { query, sendMessage } = installChromeMock({
+      ok: true,
+      payload: {
+        previousMuted: true,
+        currentMuted: false,
+        videoId: 'video-123',
+      },
+    });
+
+    const result = await setYouTubeOriginalAudioMutedInTab(17, false, 'video-123');
+
+    expect(query).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      17,
+      { type: YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST, muted: false, videoId: 'video-123' },
+      expect.any(Function),
+    );
+    expect(result).toEqual({
+      tabId: 17,
+      videoId: 'video-123',
+      previousMuted: true,
+      currentMuted: false,
     });
   });
 
@@ -180,5 +210,21 @@ describe('requestCaptions', () => {
       code: 'no_video',
       message: 'No video element was found.',
     });
+  });
+
+  it('preserves content script error codes when restoring a mismatched YouTube video tab', async () => {
+    const { query } = installChromeMock({
+      ok: false,
+      error: {
+        code: 'no_video',
+        message: 'Expected YouTube video video-123, but current page video is video-456.',
+      },
+    });
+
+    await expect(setYouTubeOriginalAudioMutedInTab(17, false, 'video-123')).rejects.toMatchObject({
+      code: 'no_video',
+      message: 'Expected YouTube video video-123, but current page video is video-456.',
+    });
+    expect(query).not.toHaveBeenCalled();
   });
 });

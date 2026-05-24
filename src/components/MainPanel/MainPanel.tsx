@@ -79,6 +79,7 @@ import useTimelineStore, { useTimelineActiveCueId, useTimelineCues, useTimelineS
 import {
   requestCaptions,
   requestYouTubeVideoTimeFromActiveTab,
+  setYouTubeOriginalAudioMutedInTab,
   setYouTubeOriginalAudioMutedFromActiveTab,
 } from '../../lib/youtube-timeline/requestCaptions';
 import { getActiveCue, getCueWindow } from '../../lib/youtube-timeline/timelineScheduler';
@@ -905,7 +906,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   const timelineSessionGenerationRef = useRef<number>(0);
   const timelineTranslationGenerationRef = useRef<number>(0);
   const timelineTickTimeoutRef = useRef<number | null>(null);
-  const timelineOriginalAudioMutedRef = useRef<{ previousMuted: boolean } | null>(null);
+  const timelineOriginalAudioMutedRef = useRef<{ tabId: number; videoId: string; previousMuted: boolean } | null>(null);
 
   // Reference to track push-to-talk duration
   const pushToTalkStartTimeRef = useRef<number | null>(null);
@@ -1204,7 +1205,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     if (!mutedState) return;
 
     try {
-      await setYouTubeOriginalAudioMutedFromActiveTab(mutedState.previousMuted);
+      await setYouTubeOriginalAudioMutedInTab(mutedState.tabId, mutedState.previousMuted, mutedState.videoId);
       timelineOriginalAudioMutedRef.current = null;
     } catch (error) {
       console.warn(`[Sokuji] [MainPanel] Failed to restore YouTube original audio after ${reason}:`, error);
@@ -1225,7 +1226,11 @@ const MainPanel: React.FC<MainPanelProps> = () => {
 
   const muteTimelineOriginalAudio = useCallback(async () => {
     const mutedState = await setYouTubeOriginalAudioMutedFromActiveTab(true);
-    timelineOriginalAudioMutedRef.current = { previousMuted: mutedState.previousMuted };
+    timelineOriginalAudioMutedRef.current = {
+      tabId: mutedState.tabId,
+      videoId: mutedState.videoId,
+      previousMuted: mutedState.previousMuted,
+    };
     if (!mutedState.currentMuted) {
       throw new Error('YouTube original audio could not be muted for timeline mode');
     }

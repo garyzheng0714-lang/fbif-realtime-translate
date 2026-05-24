@@ -15,6 +15,8 @@ export interface YouTubeVideoTimeResponse {
 }
 
 export interface YouTubeOriginalAudioMutedResponse {
+  tabId: number;
+  videoId: string;
   previousMuted: boolean;
   currentMuted: boolean;
 }
@@ -228,7 +230,7 @@ function parseVideoTimeResponse(response: unknown): YouTubeVideoTimeResponse {
   };
 }
 
-function parseOriginalAudioMutedResponse(response: unknown): YouTubeOriginalAudioMutedResponse {
+function parseOriginalAudioMutedResponse(response: unknown, tabId: number, fallbackVideoId: string): YouTubeOriginalAudioMutedResponse {
   if (!isRecord(response)) {
     throw createTimelineError('caption_fetch_failed', 'Content script returned an invalid original audio mute response');
   }
@@ -244,6 +246,8 @@ function parseOriginalAudioMutedResponse(response: unknown): YouTubeOriginalAudi
   }
 
   return {
+    tabId,
+    videoId: typeof payload.videoId === 'string' ? payload.videoId : fallbackVideoId,
     previousMuted: payload.previousMuted,
     currentMuted: payload.currentMuted,
   };
@@ -304,14 +308,41 @@ export async function requestYouTubeVideoTimeFromActiveTab(): Promise<YouTubeVid
 }
 
 export async function setYouTubeOriginalAudioMutedFromActiveTab(muted: boolean): Promise<YouTubeOriginalAudioMutedResponse> {
-  const { chromeApi, tabs, tab } = await getActiveYouTubeTab();
+  const { chromeApi, tabs, tab, videoId } = await getActiveYouTubeTab();
 
   try {
     const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, {
       type: YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST,
       muted,
+      videoId,
     });
-    return parseOriginalAudioMutedResponse(response);
+    return parseOriginalAudioMutedResponse(response, tab.id!, videoId);
+  } catch (error) {
+    if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
+      throw error;
+    }
+    if (isRecord(error) && isTimelineErrorCode(error.code)) {
+      throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
+    }
+    const message = error instanceof Error ? error.message : 'Failed to set YouTube original audio muted state';
+    throw createTimelineError('caption_fetch_failed', message);
+  }
+}
+
+export async function setYouTubeOriginalAudioMutedInTab(
+  tabId: number,
+  muted: boolean,
+  expectedVideoId?: string,
+): Promise<YouTubeOriginalAudioMutedResponse> {
+  const { chromeApi, tabs } = getChromeTabs();
+
+  try {
+    const response = await sendTimelineRequest(chromeApi, tabs, tabId, {
+      type: YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST,
+      muted,
+      ...(expectedVideoId ? { videoId: expectedVideoId } : {}),
+    });
+    return parseOriginalAudioMutedResponse(response, tabId, expectedVideoId ?? '');
   } catch (error) {
     if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
       throw error;

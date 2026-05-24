@@ -230,7 +230,15 @@ function getVideoTime() {
   };
 }
 
-function setOriginalAudioMuted(muted) {
+function setOriginalAudioMuted(muted, expectedVideoId) {
+  const currentVideoId = getCurrentUrlVideoId();
+  if (expectedVideoId && currentVideoId !== expectedVideoId) {
+    return makeError(
+      'no_video',
+      `Expected YouTube video ${expectedVideoId}, but current page video is ${currentVideoId || 'unavailable'}.`,
+    );
+  }
+
   const video = document.querySelector('video');
   if (!video) {
     return makeError('no_video', 'No YouTube video element was found on this page.');
@@ -244,6 +252,7 @@ function setOriginalAudioMuted(muted) {
     payload: {
       previousMuted,
       currentMuted: video.muted,
+      videoId: currentVideoId,
     },
   };
 }
@@ -255,7 +264,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === ORIGINAL_AUDIO_MUTE_REQUEST_TYPE) {
-    sendResponse(setOriginalAudioMuted(Boolean(message.muted)));
+    sendResponse(setOriginalAudioMuted(Boolean(message.muted), message.videoId));
     return false;
   }
 
