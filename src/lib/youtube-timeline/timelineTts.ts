@@ -21,54 +21,141 @@ function floatToInt16(samples: Float32Array): Int16Array {
 export class TimelineTts {
   private engine: TtsEngine | null = null;
   private initPromise: Promise<void> | null = null;
+  private queue: Promise<void> = Promise.resolve();
+  private generation = 0;
+  private disposeRejectors = new Set<(error: Error) => void>();
 
   initialize(): Promise<void> {
-    if (this.initPromise) return this.initPromise;
+    return this.initializeForGeneration(this.generation);
+  }
+
+  private createDisposedError(): Error {
+    return new Error('Timeline TTS disposed');
+  }
+
+  private withDisposeGuard<T>(promise: Promise<T>, generation: number): Promise<T> {
+    if (generation !== this.generation) {
+      return Promise.reject(this.createDisposedError());
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const rejectOnDispose = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        this.disposeRejectors.delete(rejectOnDispose);
+        reject(error);
+      };
+
+      this.disposeRejectors.add(rejectOnDispose);
+
+      promise.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          this.disposeRejectors.delete(rejectOnDispose);
+          if (generation !== this.generation) {
+            reject(this.createDisposedError());
+            return;
+          }
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          this.disposeRejectors.delete(rejectOnDispose);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private initializeForGeneration(generation: number): Promise<void> {
+    if (generation !== this.generation) {
+      return Promise.reject(this.createDisposedError());
+    }
+
+    if (this.initPromise) {
+      return this.withDisposeGuard(this.initPromise, generation);
+    }
 
     const engine = new TtsEngine();
     this.engine = engine;
     this.initPromise = engine.init('edge-tts')
-      .then(() => undefined)
+      .then(() => {
+        if (this.engine !== engine || generation !== this.generation) {
+          throw this.createDisposedError();
+        }
+      })
       .catch((error) => {
-        if (this.engine === engine) {
+        if (this.engine === engine && generation === this.generation) {
           this.engine = null;
           this.initPromise = null;
         }
         throw error;
       });
 
-    return this.initPromise;
+    return this.withDisposeGuard(this.initPromise, generation);
   }
 
-  async generateChinese(
+  generateChinese(
     text: string,
     onChunk: (chunk: TimelineTtsChunk) => void,
   ): Promise<void> {
-    await this.initialize();
+    const generation = this.generation;
+    const run = () => this.generateChineseForGeneration(text, onChunk, generation);
+    const result = this.queue.then(run, run);
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
+  private async generateChineseForGeneration(
+    text: string,
+    onChunk: (chunk: TimelineTtsChunk) => void,
+    generation: number,
+  ): Promise<void> {
+    if (generation !== this.generation) {
+      throw this.createDisposedError();
+    }
+
+    await this.initializeForGeneration(generation);
     if (!this.engine) {
       throw new Error('Timeline TTS engine not initialized');
     }
 
-    await this.engine.generateStream(
-      text,
-      0,
-      1.0,
-      'zh-CN',
-      (samples, sampleRate) => {
-        onChunk({
-          samples: floatToInt16(samples),
-          sampleRate,
-        });
-      },
-      'zh-CN-XiaoxiaoNeural',
+    const engine = this.engine;
+    await this.withDisposeGuard(
+      engine.generateStream(
+        text,
+        0,
+        1.0,
+        'zh-CN',
+        (samples, sampleRate) => {
+          if (generation !== this.generation) return;
+          onChunk({
+            samples: floatToInt16(samples),
+            sampleRate,
+          });
+        },
+        'zh-CN-XiaoxiaoNeural',
+      ),
+      generation,
     );
   }
 
   dispose(): void {
+    this.generation += 1;
+    const disposeError = this.createDisposedError();
+    for (const reject of this.disposeRejectors) {
+      reject(disposeError);
+    }
+    this.disposeRejectors.clear();
+
     if (this.engine) {
       this.engine.dispose();
       this.engine = null;
     }
     this.initPromise = null;
+    this.queue = Promise.resolve();
   }
 }

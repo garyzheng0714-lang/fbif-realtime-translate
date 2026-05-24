@@ -23,6 +23,21 @@ const cues: TimelineCue[] = [
   },
 ];
 
+const adjacentCues: TimelineCue[] = [
+  {
+    id: 'a',
+    startMs: 0,
+    endMs: 2000,
+    sourceText: 'First',
+  },
+  {
+    id: 'b',
+    startMs: 2000,
+    endMs: 3000,
+    sourceText: 'Second',
+  },
+];
+
 describe('timelineScheduler', () => {
   it('returns cues whose active windows overlap the prebuffer window', () => {
     expect(getCueWindow(cues, 2500, 7000).map((cue) => cue.id)).toEqual(['b', 'c']);
@@ -38,7 +53,13 @@ describe('timelineScheduler', () => {
   });
 
   it('drops prepared cues only after their end time has passed', () => {
-    expect(shouldDropPreparedCue(cues[0], 2000)).toBe(false);
-    expect(shouldDropPreparedCue(cues[0], 2001)).toBe(true);
+    expect(shouldDropPreparedCue(cues[0], 1999)).toBe(false);
+    expect(shouldDropPreparedCue(cues[0], 2000)).toBe(true);
+  });
+
+  it('uses half-open cue boundaries when seeking across adjacent captions', () => {
+    expect(getActiveCue(adjacentCues, 2000)?.id).toBe('b');
+    expect(getCueWindow(adjacentCues, 2000, 1000).map((cue) => cue.id)).toEqual(['b']);
+    expect(shouldDropPreparedCue(adjacentCues[0], 2000)).toBe(true);
   });
 });

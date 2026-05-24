@@ -6,7 +6,7 @@ export function getCueWindow(
   prebufferMs: number,
 ): TimelineCue[] {
   return cues.filter((cue) => (
-    cue.endMs >= currentTimeMs &&
+    cue.endMs > currentTimeMs &&
     cue.startMs <= currentTimeMs + prebufferMs
   ));
 }
@@ -14,10 +14,10 @@ export function getCueWindow(
 export function getActiveCue(cues: TimelineCue[], currentTimeMs: number): TimelineCue | null {
   return cues.find((cue) => (
     cue.startMs <= currentTimeMs &&
-    cue.endMs >= currentTimeMs
+    cue.endMs > currentTimeMs
   )) ?? null;
 }
 
 export function shouldDropPreparedCue(cue: TimelineCue, currentTimeMs: number): boolean {
-  return cue.endMs < currentTimeMs;
+  return cue.endMs <= currentTimeMs;
 }
