@@ -3306,13 +3306,13 @@ const MainPanel: React.FC<MainPanelProps> = () => {
           initProgress={initProgress}
           onSetMode={(mode) => {
             if (isSessionActive || isInitializing) return;
-            useSettingsStore.getState().setTranslationMode(mode).catch((error) => {
+            Promise.resolve(useSettingsStore.getState().setTranslationMode(mode)).catch((error) => {
               const message = error instanceof Error ? error.message : '切换模式失败';
               console.warn('[MainPanel] Failed to switch translation mode:', error);
               addRealtimeEvent(
-                { type: 'settings.translation_mode_error', data: { message } },
+                { type: 'session.init_error', data: { message } },
                 'client',
-                'settings.translation_mode_error'
+                'session.init_error'
               );
             });
           }}
@@ -3321,9 +3321,9 @@ const MainPanel: React.FC<MainPanelProps> = () => {
               const message = error instanceof Error ? error.message : '进入字幕浮层失败';
               console.error('[MainPanel] Failed to enter subtitle overlay:', error);
               addRealtimeEvent(
-                { type: 'subtitle.enter_error', data: { message } },
+                { type: 'session.init_error', data: { message } },
                 'client',
-                'subtitle.enter_error'
+                'session.init_error'
               );
             });
           }}
