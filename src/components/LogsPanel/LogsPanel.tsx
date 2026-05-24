@@ -4,6 +4,7 @@ import TabBar, { Tab } from '../Settings/shared/TabBar';
 import './LogsPanel.scss';
 import { useLogData, useLogActions } from '../../stores/logStore';
 import type { LogEntry, ClientId } from '../../stores/logStore';
+import { summarizeAst2Latency } from '../../stores/ast2LatencySummary';
 import { useTranslation } from 'react-i18next';
 
 interface LogsPanelProps {
@@ -108,6 +109,12 @@ const LOG_TABS: Tab[] = [
   { id: 'participant', labelKey: 'logsPanel.participantClient', fallback: 'Participant Client', icon: Users },
 ];
 
+function formatLatencyMs(value: number | null): string {
+  if (value === null) return '等待数据';
+  if (value >= 1000) return `${(value / 1000).toFixed(1)} 秒`;
+  return `${Math.round(value)} 毫秒`;
+}
+
 const LogsPanel: React.FC<LogsPanelProps> = ({ toggleLogs }) => {
   const { t } = useTranslation();
   const logs = useLogData();
@@ -123,6 +130,10 @@ const LogsPanel: React.FC<LogsPanelProps> = ({ toggleLogs }) => {
   const filteredLogs = useMemo(() => {
     return logs.filter(log => log.clientId === activeTab || log.clientId === undefined);
   }, [logs, activeTab]);
+
+  const ast2LatencySummary = useMemo(() => (
+    activeTab === 'participant' ? summarizeAst2Latency(logs, 'participant') : null
+  ), [activeTab, logs]);
 
   // Calculate visible range based on scroll position
   const updateVisibleRange = useCallback(() => {
@@ -307,6 +318,26 @@ const LogsPanel: React.FC<LogsPanelProps> = ({ toggleLogs }) => {
       >
         {filteredLogs.length > 0 ? (
           <>
+            {ast2LatencySummary?.hasData && (
+              <div className="latency-summary">
+                <div className="latency-summary__title">豆包配音延迟诊断</div>
+                <div className="latency-summary__grid">
+                  <span>中文出声</span>
+                  <strong>{formatLatencyMs(ast2LatencySummary.latestDubReadyMs)}</strong>
+                  <span>翻译字幕</span>
+                  <strong>{formatLatencyMs(ast2LatencySummary.latestTranslationReadyMs)}</strong>
+                  <span>TTS 首包</span>
+                  <strong>{formatLatencyMs(ast2LatencySummary.latestFirstTtsChunkMs)}</strong>
+                  <span>本地解码</span>
+                  <strong>{formatLatencyMs(ast2LatencySummary.latestDecodeMs)}</strong>
+                </div>
+                <div className="latency-summary__hint">
+                  {ast2LatencySummary.bottleneck === 'local_decode'
+                    ? '当前主要慢在本地音频解码。'
+                    : '当前主要慢在识别、翻译或云端 TTS 链路。'}
+                </div>
+              </div>
+            )}
             {/* Top spacer for virtual scrolling */}
             {spacerTop > 0 && <div style={{ height: spacerTop }} />}
 
