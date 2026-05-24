@@ -55,7 +55,8 @@ export function mergeShortCues(cues: TimelineCue[], minDurationMs = 1800): Timel
       groupEndMs - group[0].startMs < minDurationMs &&
       nextIndex < cues.length &&
       isAdjacent(group[group.length - 1], cues[nextIndex]) &&
-      cueDuration(cues[nextIndex]) < minDurationMs
+      cueDuration(cues[nextIndex]) < minDurationMs &&
+      cues[nextIndex].endMs - group[0].startMs <= minDurationMs
     ) {
       group.push(cues[nextIndex]);
       groupEndMs = cues[nextIndex].endMs;
@@ -69,28 +70,49 @@ export function mergeShortCues(cues: TimelineCue[], minDurationMs = 1800): Timel
   return merged;
 }
 
-export async function translateTimelineCues(
+export async function translateTimelineCueBatch(
   cues: TimelineCue[],
   translator: TimelineTranslator,
   targetLanguage = 'zh',
 ): Promise<TimelineCue[]> {
-  const merged = mergeShortCues(cues);
-  const texts = merged.map((cue) => cue.sourceText);
+  const texts = cues.map((cue) => cue.sourceText);
   const translatedTexts = await translator.translateBatch(texts, targetLanguage);
 
   if (translatedTexts.length !== texts.length) {
     throw new Error(`翻译结果数量不匹配：请求 ${texts.length} 条，返回 ${translatedTexts.length} 条`);
   }
 
-  return merged.map((cue, index) => ({
+  return cues.map((cue, index) => ({
     ...cue,
     translatedText: translatedTexts[index],
   }));
 }
 
+export function getTimelineCuesToTranslate(
+  cues: TimelineCue[],
+  translatingCueIds: ReadonlySet<string>,
+  queuedCueIds: ReadonlySet<string>,
+): TimelineCue[] {
+  return cues.filter((cue) => (
+    !cue.translatedText &&
+    !translatingCueIds.has(cue.id) &&
+    !queuedCueIds.has(cue.id)
+  ));
+}
+
+export async function translateTimelineCues(
+  cues: TimelineCue[],
+  translator: TimelineTranslator,
+  targetLanguage = 'zh',
+): Promise<TimelineCue[]> {
+  const merged = mergeShortCues(cues);
+  return translateTimelineCueBatch(merged, translator, targetLanguage);
+}
+
 export class TranslationEngineTimelineTranslator implements TimelineTranslator {
   private engine: TranslationEngineLike | null = null;
   private initializedTargetLanguage: string | null = null;
+  private queue: Promise<void> = Promise.resolve();
   private generation = 0;
   private disposeRejectors = new Set<(error: Error) => void>();
   private readonly sourceLanguage: string;
@@ -104,6 +126,13 @@ export class TranslationEngineTimelineTranslator implements TimelineTranslator {
   }
 
   async translateBatch(texts: string[], targetLanguage: string): Promise<string[]> {
+    const run = () => this.translateBatchNow(texts, targetLanguage);
+    const result = this.queue.then(run, run);
+    this.queue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async translateBatchNow(texts: string[], targetLanguage: string): Promise<string[]> {
     if (texts.length === 0) return [];
 
     const generation = this.generation;
@@ -136,6 +165,7 @@ export class TranslationEngineTimelineTranslator implements TimelineTranslator {
     }
     this.disposeRejectors.clear();
     this.closeEngine();
+    this.queue = Promise.resolve();
   }
 
   private async ensureEngine(targetLanguage: string, generation: number): Promise<TranslationEngineLike> {

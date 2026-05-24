@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  getTimelineCuesToTranslate,
   mergeShortCues,
+  translateTimelineCueBatch,
   translateTimelineCues,
   TranslationEngineTimelineTranslator,
 } from './timelineTranslate';
@@ -59,6 +61,25 @@ describe('timelineTranslate', () => {
     ]);
   });
 
+  it('does not merge near-threshold cues into a much longer cue', () => {
+    const nearThresholdCues: TimelineCue[] = [
+      {
+        id: 'a',
+        startMs: 0,
+        endMs: 1700,
+        sourceText: 'First near-threshold cue',
+      },
+      {
+        id: 'b',
+        startMs: 1700,
+        endMs: 3400,
+        sourceText: 'Second near-threshold cue',
+      },
+    ];
+
+    expect(mergeShortCues(nearThresholdCues, 1800)).toEqual(nearThresholdCues);
+  });
+
   it('maps batch translations back onto merged cues', async () => {
     const translator = {
       translateBatch: vi.fn(async (texts: string[]) => texts.map((text) => `中文:${text}`)),
@@ -71,6 +92,40 @@ describe('timelineTranslate', () => {
       '中文:Hello world',
       '中文:Long enough',
     ]);
+  });
+
+  it('maps incremental batch translations without changing cue timing or ids', async () => {
+    const translator = {
+      translateBatch: vi.fn(async (texts: string[]) => texts.map((text) => `中文:${text}`)),
+    };
+
+    const translated = await translateTimelineCueBatch(cues.slice(0, 2), translator, 'zh');
+
+    expect(translator.translateBatch).toHaveBeenCalledWith(['Hello', 'world'], 'zh');
+    expect(translated).toEqual([
+      {
+        ...cues[0],
+        translatedText: '中文:Hello',
+      },
+      {
+        ...cues[1],
+        translatedText: '中文:world',
+      },
+    ]);
+  });
+
+  it('selects only untranslated cues that are not already translating or queued', () => {
+    expect(
+      getTimelineCuesToTranslate(
+        [
+          cues[0],
+          { ...cues[1], translatedText: '已翻译' },
+          cues[2],
+        ],
+        new Set(['c']),
+        new Set(['c']),
+      ),
+    ).toEqual([cues[0]]);
   });
 
   it('fails loud when the translator returns fewer results than requested', async () => {
