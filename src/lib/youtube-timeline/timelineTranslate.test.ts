@@ -46,6 +46,14 @@ async function expectRejectedWithoutHanging(promise: Promise<unknown>): Promise<
   ])).rejects.toThrow(/translation disposed/i);
 }
 
+async function waitForCondition(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 10; i++) {
+    if (condition()) return;
+    await Promise.resolve();
+  }
+  throw new Error('condition was not met');
+}
+
 describe('timelineTranslate', () => {
   it('merges short adjacent cues so TTS receives less fragmented timeline text', () => {
     const merged = mergeShortCues(cues, 1800);
@@ -128,6 +136,16 @@ describe('timelineTranslate', () => {
     ).toEqual([cues[0]]);
   });
 
+  it('does not treat an empty translatedText as still waiting for translation', () => {
+    expect(
+      getTimelineCuesToTranslate(
+        [{ ...cues[0], translatedText: '' }],
+        new Set(),
+        new Set(),
+      ),
+    ).toEqual([]);
+  });
+
   it('fails loud when the translator returns fewer results than requested', async () => {
     const translator = {
       translateBatch: vi.fn(async () => ['只有一句']),
@@ -135,6 +153,16 @@ describe('timelineTranslate', () => {
 
     await expect(translateTimelineCues(cues, translator, 'zh')).rejects.toThrow(
       /翻译结果数量不匹配/,
+    );
+  });
+
+  it('fails loud when the translator returns an empty translation', async () => {
+    const translator = {
+      translateBatch: vi.fn(async () => ['   ']),
+    };
+
+    await expect(translateTimelineCueBatch([cues[0]], translator, 'zh')).rejects.toThrow(
+      /翻译结果为空/,
     );
   });
 
@@ -184,5 +212,47 @@ describe('timelineTranslate', () => {
 
     expect(engine.dispose).toHaveBeenCalledTimes(1);
     await expectRejectedWithoutHanging(batch);
+  });
+
+  it('rejects queued batches that have not started when disposed', async () => {
+    const translateDeferred = createDeferred<{
+      sourceText: string;
+      translatedText: string;
+      inferenceTimeMs: number;
+    }>();
+    const calls: string[] = [];
+    const engine = {
+      init: vi.fn(async () => {
+        calls.push('init');
+        return { loadTimeMs: 1, device: 'mock' };
+      }),
+      translate: vi.fn(async (text: string) => {
+        calls.push(`translate:${text}`);
+        return translateDeferred.promise;
+      }),
+      dispose: vi.fn(() => {
+        calls.push('dispose');
+      }),
+    };
+    const translator = new TranslationEngineTimelineTranslator({
+      createEngine: () => engine,
+    });
+
+    const first = translator.translateBatch(['a'], 'zh');
+    await waitForCondition(() => calls.includes('translate:a'));
+
+    const second = translator.translateBatch(['b'], 'zh');
+    translator.dispose();
+    translateDeferred.resolve({
+      sourceText: 'a',
+      translatedText: 'A',
+      inferenceTimeMs: 1,
+    });
+
+    await expect(first).rejects.toThrow(/translation disposed/i);
+    await expect(second).rejects.toThrow(/translation disposed/i);
+    expect(calls).toEqual(['init', 'translate:a', 'dispose']);
+    expect(engine.init).toHaveBeenCalledTimes(1);
+    expect(engine.translate).toHaveBeenCalledTimes(1);
   });
 });

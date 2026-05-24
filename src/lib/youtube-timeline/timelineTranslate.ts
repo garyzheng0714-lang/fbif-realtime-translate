@@ -84,8 +84,15 @@ export async function translateTimelineCueBatch(
 
   return cues.map((cue, index) => ({
     ...cue,
-    translatedText: translatedTexts[index],
+    translatedText: validateTranslatedText(translatedTexts[index], index),
   }));
+}
+
+function validateTranslatedText(text: string, index: number): string {
+  if (text.trim() === '') {
+    throw new Error(`翻译结果为空：第 ${index + 1} 条字幕没有可朗读的中文译文`);
+  }
+  return text;
 }
 
 export function getTimelineCuesToTranslate(
@@ -94,7 +101,7 @@ export function getTimelineCuesToTranslate(
   queuedCueIds: ReadonlySet<string>,
 ): TimelineCue[] {
   return cues.filter((cue) => (
-    !cue.translatedText &&
+    cue.translatedText === undefined &&
     !translatingCueIds.has(cue.id) &&
     !queuedCueIds.has(cue.id)
   ));
@@ -126,16 +133,19 @@ export class TranslationEngineTimelineTranslator implements TimelineTranslator {
   }
 
   async translateBatch(texts: string[], targetLanguage: string): Promise<string[]> {
-    const run = () => this.translateBatchNow(texts, targetLanguage);
+    const generation = this.generation;
+    const run = () => this.translateBatchNow(texts, targetLanguage, generation);
     const result = this.queue.then(run, run);
     this.queue = result.then(() => undefined, () => undefined);
     return result;
   }
 
-  private async translateBatchNow(texts: string[], targetLanguage: string): Promise<string[]> {
+  private async translateBatchNow(texts: string[], targetLanguage: string, generation: number): Promise<string[]> {
+    if (generation !== this.generation) {
+      throw this.createDisposedError();
+    }
     if (texts.length === 0) return [];
 
-    const generation = this.generation;
     const normalizedTargetLanguage = normalizeLanguage(targetLanguage);
     const engine = await this.ensureEngine(normalizedTargetLanguage, generation);
     const prompt = buildDefaultLocalPrompt(this.sourceLanguage, normalizedTargetLanguage);
@@ -147,7 +157,7 @@ export class TranslationEngineTimelineTranslator implements TimelineTranslator {
           engine.translate(text, prompt, true),
           generation,
         );
-        translatedTexts.push(result.translatedText);
+        translatedTexts.push(validateTranslatedText(result.translatedText, translatedTexts.length));
       }
     } catch (error) {
       if (this.isDisposedError(error)) throw error;

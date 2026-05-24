@@ -1310,7 +1310,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       const prepareCueAudio = async (cue: TimelineCue) => {
         if (
           !isTimelineSessionActive() ||
-          !cue.translatedText ||
+          cue.translatedText === undefined ||
           timelinePreparedAudioRef.current.has(cue.id) ||
           timelineGeneratingCueIdsRef.current.has(cue.id) ||
           timelineQueuedCueIdsRef.current.has(cue.id)
@@ -1326,6 +1326,9 @@ const MainPanel: React.FC<MainPanelProps> = () => {
             timelineTtsRef.current = new TimelineTts();
           }
           const tts = timelineTtsRef.current;
+          if (cue.translatedText.trim() === '') {
+            throw new Error('视频同步模式字幕翻译结果为空，已停止播放以避免朗读英文原文');
+          }
           await tts.generateChinese(cue.translatedText, (chunk) => {
             if (!isTimelineSessionActive()) return;
             chunks.push(chunk.samples);
