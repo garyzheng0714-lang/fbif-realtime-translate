@@ -106,6 +106,28 @@ export function buildVolcengineAST2AuthHeaders(
   };
 }
 
+export interface VolcengineAST2LatencyState {
+  sessionStartedAt?: number;
+  lastInputAudioSentAt?: number;
+  ttsSentenceStartedAt?: number;
+  firstTtsChunkReceivedAt?: number;
+}
+
+export function buildVolcengineAST2LatencySnapshot(
+  state: VolcengineAST2LatencyState,
+  receivedAt: number,
+  response: { startTime?: number; endTime?: number } = {}
+): Record<string, number> {
+  const latency: Record<string, number> = { receivedAt };
+  if (state.sessionStartedAt) latency.sinceSessionStartMs = receivedAt - state.sessionStartedAt;
+  if (state.lastInputAudioSentAt) latency.sinceLastInputAudioMs = receivedAt - state.lastInputAudioSentAt;
+  if (state.ttsSentenceStartedAt) latency.sinceTtsSentenceStartMs = receivedAt - state.ttsSentenceStartedAt;
+  if (state.firstTtsChunkReceivedAt) latency.sinceFirstTtsChunkMs = receivedAt - state.firstTtsChunkReceivedAt;
+  if (typeof response.startTime === 'number') latency.serverStartTime = response.startTime;
+  if (typeof response.endTime === 'number') latency.serverEndTime = response.endTime;
+  return latency;
+}
+
 export class VolcengineAST2Client implements IClient {
   private appId: string;
   private accessToken: string;
@@ -139,6 +161,12 @@ export class VolcengineAST2Client implements IClient {
   // Keepalive: send silent audio frames when mic is muted to prevent server timeout
   private keepaliveInterval: ReturnType<typeof setInterval> | null = null;
   private lastAudioSentTime: number = 0;
+
+  // Latency diagnostics: only timestamps, never audio payloads
+  private sessionStartedAt: number = 0;
+  private lastInputAudioSentAt: number = 0;
+  private ttsSentenceStartedAt: number = 0;
+  private firstTtsChunkReceivedAt: number = 0;
 
   // Whether we registered WebSocket headers that need cleanup (Electron/Extension)
   private headersRegistered = false;
@@ -187,6 +215,10 @@ export class VolcengineAST2Client implements IClient {
     this.lastCompletedTranslationItemId = null;
     this.lastResponseSequence = -1;
     this.ttsSentenceTargetItemId = null;
+    this.sessionStartedAt = 0;
+    this.lastInputAudioSentAt = 0;
+    this.ttsSentenceStartedAt = 0;
+    this.firstTtsChunkReceivedAt = 0;
 
     if (isElectron() && window.electron?.invoke) {
       return this.connectViaElectronHeaderInjection();
@@ -442,6 +474,15 @@ export class VolcengineAST2Client implements IClient {
     try {
       const response = TranslateResponse.decode(new Uint8Array(data));
       const eventType: number = response.event;
+      const receivedAt = Date.now();
+
+      if (eventType === EventType.TTSSentenceStart && !this.currentConfig?.textOnly) {
+        this.ttsSentenceStartedAt = receivedAt;
+        this.firstTtsChunkReceivedAt = 0;
+      }
+      if (eventType === EventType.TTSResponse && !this.currentConfig?.textOnly && response.data?.length && !this.firstTtsChunkReceivedAt) {
+        this.firstTtsChunkReceivedAt = receivedAt;
+      }
 
       this.eventHandlers.onRealtimeEvent?.({
         source: 'server',
@@ -455,6 +496,16 @@ export class VolcengineAST2Client implements IClient {
             audioDataLength: response.data?.length || 0,
             sessionId: response.responseMeta?.SessionID,
             statusCode: response.responseMeta?.StatusCode,
+            latency: buildVolcengineAST2LatencySnapshot(
+              {
+                sessionStartedAt: this.sessionStartedAt,
+                lastInputAudioSentAt: this.lastInputAudioSentAt,
+                ttsSentenceStartedAt: this.ttsSentenceStartedAt,
+                firstTtsChunkReceivedAt: this.firstTtsChunkReceivedAt,
+              },
+              receivedAt,
+              { startTime: response.startTime, endTime: response.endTime }
+            ),
           }
         }
       });
@@ -618,6 +669,7 @@ export class VolcengineAST2Client implements IClient {
 
   private handleSessionStarted(): void {
     console.log('[VolcengineAST2Client] Session started successfully');
+    this.sessionStartedAt = Date.now();
     this.startKeepalive();
 
     if (this.sessionStartedResolve) {
@@ -734,6 +786,7 @@ export class VolcengineAST2Client implements IClient {
    */
   private async decodeTTSAndPlay(): Promise<void> {
     if (this.ttsChunks.length === 0) return;
+    const decodeStartedAt = Date.now();
 
     // Concatenate all chunks into a single Ogg Opus blob
     const totalLength = this.ttsChunks.reduce((sum, c) => sum + c.length, 0);
@@ -764,9 +817,34 @@ export class VolcengineAST2Client implements IClient {
       // Use the item ID locked at TTSSentenceStart, falling back to current state
       const targetItemId = this.ttsSentenceTargetItemId || this.currentTranslationItemId || this.lastCompletedTranslationItemId;
       this.ttsSentenceTargetItemId = null; // consumed — reset for next TTS sentence
+      const decodeCompletedAt = Date.now();
+      const decodeDurationMs = decodeCompletedAt - decodeStartedAt;
       const existingItem = targetItemId
         ? this.conversationItems.find(i => i.id === targetItemId)
         : null;
+
+      this.eventHandlers.onRealtimeEvent?.({
+        source: 'client',
+        event: {
+          type: 'tts.decode.completed',
+          data: {
+            opusBytes: totalLength,
+            audioSamples: int16Array.length,
+            latency: {
+              ...buildVolcengineAST2LatencySnapshot(
+                {
+                  sessionStartedAt: this.sessionStartedAt,
+                  lastInputAudioSentAt: this.lastInputAudioSentAt,
+                  ttsSentenceStartedAt: this.ttsSentenceStartedAt,
+                  firstTtsChunkReceivedAt: this.firstTtsChunkReceivedAt,
+                },
+                decodeCompletedAt
+              ),
+              decodeDurationMs,
+            },
+          },
+        },
+      });
 
       if (existingItem) {
         // Concatenate audio if the item already has some (multiple TTS sentences)
@@ -887,6 +965,10 @@ export class VolcengineAST2Client implements IClient {
     this.lastCompletedTranslationItemId = null;
     this.lastResponseSequence = -1;
     this.ttsSentenceTargetItemId = null;
+    this.sessionStartedAt = 0;
+    this.lastInputAudioSentAt = 0;
+    this.ttsSentenceStartedAt = 0;
+    this.firstTtsChunkReceivedAt = 0;
   }
 
   appendInputAudio(audioData: Int16Array): void {
@@ -913,7 +995,9 @@ export class VolcengineAST2Client implements IClient {
     }).finish();
 
     this.sendData(request);
-    this.lastAudioSentTime = Date.now();
+    const sentAt = Date.now();
+    this.lastAudioSentTime = sentAt;
+    this.lastInputAudioSentAt = sentAt;
   }
 
   /**

@@ -8,6 +8,7 @@ vi.mock('../../locales', () => ({
 // Dynamic import after mocks
 const {
   buildCorpusFromConfig,
+  buildVolcengineAST2LatencySnapshot,
   buildVolcengineAST2AuthHeaders,
 } = await import('./VolcengineAST2Client');
 
@@ -106,6 +107,35 @@ describe('buildVolcengineAST2AuthHeaders', () => {
       'X-Api-Access-Key': 'access-token-1',
       'X-Api-Resource-Id': 'volc.service_type.10053',
       'X-Api-Connect-Id': 'connect-2',
+    });
+  });
+});
+
+describe('buildVolcengineAST2LatencySnapshot', () => {
+  it('summarizes client-side timing so delayed dubbing can be attributed by stage', () => {
+    expect(buildVolcengineAST2LatencySnapshot(
+      {
+        sessionStartedAt: 1000,
+        lastInputAudioSentAt: 2500,
+        ttsSentenceStartedAt: 3200,
+        firstTtsChunkReceivedAt: 3600,
+      },
+      4000,
+      { startTime: 1200, endTime: 2800 }
+    )).toEqual({
+      receivedAt: 4000,
+      sinceSessionStartMs: 3000,
+      sinceLastInputAudioMs: 1500,
+      sinceTtsSentenceStartMs: 800,
+      sinceFirstTtsChunkMs: 400,
+      serverStartTime: 1200,
+      serverEndTime: 2800,
+    });
+  });
+
+  it('omits unavailable fields instead of inventing latency data', () => {
+    expect(buildVolcengineAST2LatencySnapshot({}, 4000, {})).toEqual({
+      receivedAt: 4000,
     });
   });
 });
