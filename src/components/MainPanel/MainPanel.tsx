@@ -1385,195 +1385,204 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       // Determine if WebRTC transport should be used
       let useWebRTC = transportType === 'webrtc' && ClientFactory.supportsWebRTC(provider);
 
-      // Create speaker client using helper
-      clientRef.current = createAIClient(modelName, apiKey, useWebRTC);
+      const isExtensionTabCaptureOnlyMode = isExtension() && isSystemAudioCaptureEnabled;
 
-      // Setup listeners for the new client instance
-      await setupClientListeners();
-
-      const client = clientRef.current;
-
-      // Note: canHoldToSpeak is now derived via useMemo from currentTurnDetectionMode
-      // at component scope — no imperative setter needed here.
-
-      // Connect to microphone only if input device is turned on
-      if (isInputDeviceOn) {
-        if (selectedInputDevice) {
-          // Note: Don't start recording yet, just prepare the device
-          // Recording will be started below based on turn detection mode
-          // Passthrough is already configured via the useEffect hook
-        } else {
-          console.warn('[Sokuji] [MainPanel] No input device selected, cannot connect to microphone');
-        }
+      if (isExtensionTabCaptureOnlyMode) {
+        clientRef.current = null;
+        useWebRTC = false;
+        setIsUsingWebRTC(false);
+        console.info('[Sokuji] [MainPanel] Extension tab-capture mode: skipping speaker client');
       } else {
-        console.debug('[Sokuji] [MainPanel] Input device is turned off, not connecting to microphone');
-      }
+        // Create speaker client using helper
+        clientRef.current = createAIClient(modelName, apiKey, useWebRTC);
 
-      // If output device is ON, ensure monitor device is connected immediately
-      if (isMonitorDeviceOn && selectedMonitorDevice &&
-        !selectedMonitorDevice.label.toLowerCase().includes('sokuji_virtual') &&
-        !selectedMonitorDevice.label.includes('Sokuji Virtual Output') &&
-        !selectedMonitorDevice.label.toLowerCase().includes('sokujivirtualaudio')) {
-        console.debug('[Sokuji] [MainPanel] Setting up monitor device to:', selectedMonitorDevice.label);
+        // Setup listeners for the new client instance
+        await setupClientListeners();
 
-        // Trigger the selectMonitorDevice function to reconnect the monitor
-        // This will use the audio service properly through the AudioContext
-        selectMonitorDevice(selectedMonitorDevice);
-      }
+        const client = clientRef.current;
 
-      // Get session configuration
-      const sessionConfig = getSessionConfig();
+        // Note: canHoldToSpeak is now derived via useMemo from currentTurnDetectionMode
+        // at component scope — no imperative setter needed here.
 
-      // Track connection attempt and measure latency
-      const connectionStartTime = Date.now();
-
-      try {
-        // Connect to the AI service
-        await client.connect(sessionConfig);
-
-        // Track successful connection with latency
-        const connectionLatency = Date.now() - connectionStartTime;
-        trackEvent('latency_measurement', {
-          operation: useWebRTC ? 'webrtc' : 'websocket',
-          latency_ms: connectionLatency,
-          provider: provider
-        });
-
-        trackEvent('connection_status', {
-          status: 'connected',
-          provider: provider || Provider.OPENAI,
-          duration_ms: connectionLatency,
-          transport: useWebRTC ? 'webrtc' : 'websocket'
-        });
-      } catch (connectError: any) {
-        // If WebRTC connection failed, try fallback to WebSocket
-        if (useWebRTC) {
-          console.warn('[Sokuji] [MainPanel] WebRTC connection failed, falling back to WebSocket:', connectError);
-
-          // Create a new client with WebSocket transport
-          useWebRTC = false;
-          clientRef.current = createAIClient(modelName, apiKey, false);
-
-          // Re-setup listeners for the new client instance
-          await setupClientListeners();
-
-          const fallbackClient = clientRef.current;
-
-          try {
-            await fallbackClient.connect(sessionConfig);
-
-            // Track successful fallback connection
-            const connectionLatency = Date.now() - connectionStartTime;
-            trackEvent('latency_measurement', {
-              operation: 'websocket_fallback',
-              latency_ms: connectionLatency,
-              provider: provider
-            });
-
-            trackEvent('connection_status', {
-              status: 'connected',
-              provider: provider || Provider.OPENAI,
-              duration_ms: connectionLatency,
-              transport: 'websocket_fallback'
-            });
-
-            // Notify user about the fallback
-            addRealtimeEvent(
-              { type: 'session.webrtc_fallback', data: { message: t('logs.webrtcFallback', 'WebRTC connection failed, using WebSocket instead') } },
-              'client', 'session.webrtc_fallback'
-            );
-
-            console.info('[Sokuji] [MainPanel] WebSocket fallback connection established');
-          } catch (fallbackError: any) {
-            // Track fallback connection failure
-            trackEvent('api_error', {
-              provider: provider || Provider.OPENAI,
-              error_message: fallbackError.message || 'Fallback connection failed',
-              error_type: 'network'
-            });
-            throw fallbackError;
+        // Connect to microphone only if input device is turned on
+        if (isInputDeviceOn) {
+          if (selectedInputDevice) {
+            // Note: Don't start recording yet, just prepare the device
+            // Recording will be started below based on turn detection mode
+            // Passthrough is already configured via the useEffect hook
+          } else {
+            console.warn('[Sokuji] [MainPanel] No input device selected, cannot connect to microphone');
           }
         } else {
-          // Track connection failure (no fallback available)
-          trackEvent('api_error', {
+          console.debug('[Sokuji] [MainPanel] Input device is turned off, not connecting to microphone');
+        }
+
+        // If output device is ON, ensure monitor device is connected immediately
+        if (isMonitorDeviceOn && selectedMonitorDevice &&
+          !selectedMonitorDevice.label.toLowerCase().includes('sokuji_virtual') &&
+          !selectedMonitorDevice.label.includes('Sokuji Virtual Output') &&
+          !selectedMonitorDevice.label.toLowerCase().includes('sokujivirtualaudio')) {
+          console.debug('[Sokuji] [MainPanel] Setting up monitor device to:', selectedMonitorDevice.label);
+
+          // Trigger the selectMonitorDevice function to reconnect the monitor
+          // This will use the audio service properly through the AudioContext
+          selectMonitorDevice(selectedMonitorDevice);
+        }
+
+        // Get session configuration
+        const sessionConfig = getSessionConfig();
+
+        // Track connection attempt and measure latency
+        const connectionStartTime = Date.now();
+
+        try {
+          // Connect to the AI service
+          await client.connect(sessionConfig);
+
+          // Track successful connection with latency
+          const connectionLatency = Date.now() - connectionStartTime;
+          trackEvent('latency_measurement', {
+            operation: useWebRTC ? 'webrtc' : 'websocket',
+            latency_ms: connectionLatency,
+            provider: provider
+          });
+
+          trackEvent('connection_status', {
+            status: 'connected',
             provider: provider || Provider.OPENAI,
-            error_message: connectError.message || 'Connection failed',
-            error_type: 'network'
+            duration_ms: connectionLatency,
+            transport: useWebRTC ? 'webrtc' : 'websocket'
           });
-          throw connectError;
+        } catch (connectError: any) {
+          // If WebRTC connection failed, try fallback to WebSocket
+          if (useWebRTC) {
+            console.warn('[Sokuji] [MainPanel] WebRTC connection failed, falling back to WebSocket:', connectError);
+
+            // Create a new client with WebSocket transport
+            useWebRTC = false;
+            clientRef.current = createAIClient(modelName, apiKey, false);
+
+            // Re-setup listeners for the new client instance
+            await setupClientListeners();
+
+            const fallbackClient = clientRef.current;
+
+            try {
+              await fallbackClient.connect(sessionConfig);
+
+              // Track successful fallback connection
+              const connectionLatency = Date.now() - connectionStartTime;
+              trackEvent('latency_measurement', {
+                operation: 'websocket_fallback',
+                latency_ms: connectionLatency,
+                provider: provider
+              });
+
+              trackEvent('connection_status', {
+                status: 'connected',
+                provider: provider || Provider.OPENAI,
+                duration_ms: connectionLatency,
+                transport: 'websocket_fallback'
+              });
+
+              // Notify user about the fallback
+              addRealtimeEvent(
+                { type: 'session.webrtc_fallback', data: { message: t('logs.webrtcFallback', 'WebRTC connection failed, using WebSocket instead') } },
+                'client', 'session.webrtc_fallback'
+              );
+
+              console.info('[Sokuji] [MainPanel] WebSocket fallback connection established');
+            } catch (fallbackError: any) {
+              // Track fallback connection failure
+              trackEvent('api_error', {
+                provider: provider || Provider.OPENAI,
+                error_message: fallbackError.message || 'Fallback connection failed',
+                error_type: 'network'
+              });
+              throw fallbackError;
+            }
+          } else {
+            // Track connection failure (no fallback available)
+            trackEvent('api_error', {
+              provider: provider || Provider.OPENAI,
+              error_message: connectError.message || 'Connection failed',
+              error_type: 'network'
+            });
+            throw connectError;
+          }
         }
-      }
 
-      // Mode-derived flags for recorder lifecycle.
-      // Both 'Disabled' (OpenAI) and 'Push-to-Talk' (others) mean "key-hold-only mode";
-      // 'Push-to-Translate' is its own gated-callback mode (handled separately below).
-      const isPushToTranslateMode = currentTurnDetectionMode === 'Push-to-Translate';
-      const isPureManualMode =
-        currentTurnDetectionMode === 'Disabled' || currentTurnDetectionMode === 'Push-to-Talk';
+        // Mode-derived flags for recorder lifecycle.
+        // Both 'Disabled' (OpenAI) and 'Push-to-Talk' (others) mean "key-hold-only mode";
+        // 'Push-to-Translate' is its own gated-callback mode (handled separately below).
+        const isPushToTranslateMode = currentTurnDetectionMode === 'Push-to-Translate';
+        const isPureManualMode =
+          currentTurnDetectionMode === 'Disabled' || currentTurnDetectionMode === 'Push-to-Talk';
 
-      // Check if provider uses native audio capture (OpenAI WebRTC or PalabraAI/LiveKit)
-      // In native capture mode, audio is automatically captured via MediaStreamTrack
-      // No need to manually record and send audio chunks
-      const usesNativeCapture = ClientFactory.usesNativeAudioCapture(provider, useWebRTC ? 'webrtc' : 'websocket');
+        // Check if provider uses native audio capture (OpenAI WebRTC or PalabraAI/LiveKit)
+        // In native capture mode, audio is automatically captured via MediaStreamTrack
+        // No need to manually record and send audio chunks
+        const usesNativeCapture = ClientFactory.usesNativeAudioCapture(provider, useWebRTC ? 'webrtc' : 'websocket');
 
-      // Sync noise suppression state for the new session (ensures RNNoise is
-      // removed when disabled, not just added when enabled)
-      if (audioServiceRef.current) {
-        await audioServiceRef.current.getRecorder().setNoiseSuppressionMode(noiseSuppressionMode);
-      }
+        // Sync noise suppression state for the new session (ensures RNNoise is
+        // removed when disabled, not just added when enabled)
+        if (audioServiceRef.current) {
+          await audioServiceRef.current.getRecorder().setNoiseSuppressionMode(noiseSuppressionMode);
+        }
 
-      // Recorder lifecycle (skip entirely for native MediaStreamTrack capture):
-      //  - Push-to-Translate: start now, gated callback (skip AI forwarding when isPassthrough)
-      //  - Pure PTT (Disabled/Push-to-Talk): defer recorder start to space keydown
-      //  - Otherwise (VAD modes — Auto/Normal/Semantic): start now, always-forward callback
-      if (!usesNativeCapture && isInputDeviceOn && audioServiceRef.current) {
-        if (isPushToTranslateMode) {
-          let p2tCallbackCount = 0;
-          await audioServiceRef.current.startRecording(selectedInputDevice?.deviceId, (data) => {
-            if (!clientRef.current) return;
-            if (data.isPassthrough) {
-              return;  // IDLE: route to passthrough only, don't send to AI
-            }
-            if (p2tCallbackCount % 100 === 0) {
-              console.debug(`[Sokuji] [MainPanel] P2T: Sending audio to client: chunk ${p2tCallbackCount}, PCM length: ${data.mono.length}`);
-            }
-            p2tCallbackCount++;
-
-            // Track non-silent audio chunks for empty-request detection (mirrors pure PTT)
-            if (!isSilentAudio(data.mono)) {
-              pttVoiceChunkCountRef.current++;
-            }
-
-            clientRef.current.appendInputAudio(data.mono);
-          });
-        } else if (!isPureManualMode) {
-          // VAD: always-forward callback
-          let audioCallbackCount = 0;
-          await audioServiceRef.current.startRecording(selectedInputDevice?.deviceId, (data) => {
-            if (clientRef.current) {
-              // Debug logging every 100 calls to verify AI client receives data
-              if (audioCallbackCount % 100 === 0) {
-                console.debug(`[Sokuji] [MainPanel] Sending audio to client: chunk ${audioCallbackCount}, PCM length: ${data.mono.length}`);
+        // Recorder lifecycle (skip entirely for native MediaStreamTrack capture):
+        //  - Push-to-Translate: start now, gated callback (skip AI forwarding when isPassthrough)
+        //  - Pure PTT (Disabled/Push-to-Talk): defer recorder start to space keydown
+        //  - Otherwise (VAD modes — Auto/Normal/Semantic): start now, always-forward callback
+        if (!usesNativeCapture && isInputDeviceOn && audioServiceRef.current) {
+          if (isPushToTranslateMode) {
+            let p2tCallbackCount = 0;
+            await audioServiceRef.current.startRecording(selectedInputDevice?.deviceId, (data) => {
+              if (!clientRef.current) return;
+              if (data.isPassthrough) {
+                return;  // IDLE: route to passthrough only, don't send to AI
               }
-              audioCallbackCount++;
+              if (p2tCallbackCount % 100 === 0) {
+                console.debug(`[Sokuji] [MainPanel] P2T: Sending audio to client: chunk ${p2tCallbackCount}, PCM length: ${data.mono.length}`);
+              }
+              p2tCallbackCount++;
+
+              // Track non-silent audio chunks for empty-request detection (mirrors pure PTT)
+              if (!isSilentAudio(data.mono)) {
+                pttVoiceChunkCountRef.current++;
+              }
+
               clientRef.current.appendInputAudio(data.mono);
-            }
-          });
-        }
-        // else: pure PTT — recorder stays idle until space keydown.
-      } else if (usesNativeCapture) {
-        console.info('[Sokuji] [MainPanel] Native MediaStreamTrack mode - audio flows automatically');
+            });
+          } else if (!isPureManualMode) {
+            // VAD: always-forward callback
+            let audioCallbackCount = 0;
+            await audioServiceRef.current.startRecording(selectedInputDevice?.deviceId, (data) => {
+              if (clientRef.current) {
+                // Debug logging every 100 calls to verify AI client receives data
+                if (audioCallbackCount % 100 === 0) {
+                  console.debug(`[Sokuji] [MainPanel] Sending audio to client: chunk ${audioCallbackCount}, PCM length: ${data.mono.length}`);
+                }
+                audioCallbackCount++;
+                clientRef.current.appendInputAudio(data.mono);
+              }
+            });
+          }
+          // else: pure PTT — recorder stays idle until space keydown.
+        } else if (usesNativeCapture) {
+          console.info('[Sokuji] [MainPanel] Native MediaStreamTrack mode - audio flows automatically');
 
-        // Apply initial mute state based on isMonitorDeviceOn (WebRTC only, not PalabraAI)
-        if (useWebRTC && typeof clientRef.current?.setOutputMuted === 'function') {
-          clientRef.current.setOutputMuted(!isMonitorDeviceOn);
-          console.debug('[Sokuji] [MainPanel] WebRTC initial mute state:', !isMonitorDeviceOn);
+          // Apply initial mute state based on isMonitorDeviceOn (WebRTC only, not PalabraAI)
+          if (useWebRTC && typeof clientRef.current?.setOutputMuted === 'function') {
+            clientRef.current.setOutputMuted(!isMonitorDeviceOn);
+            console.debug('[Sokuji] [MainPanel] WebRTC initial mute state:', !isMonitorDeviceOn);
+          }
         }
+
+        // Track if using WebRTC (after fallback logic is complete)
+        // Note: PalabraAI uses appendInputAudio pattern, not native WebRTC audio
+        setIsUsingWebRTC(useWebRTC);
       }
-
-      // Track if using WebRTC (after fallback logic is complete)
-      // Note: PalabraAI uses appendInputAudio pattern, not native WebRTC audio
-      setIsUsingWebRTC(useWebRTC);
 
       // Start participant audio client (unified for both Electron system audio and Extension tab audio)
       // Both capture "other participant" audio and send to AI for translation
