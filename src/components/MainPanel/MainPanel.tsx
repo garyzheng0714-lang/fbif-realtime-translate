@@ -468,15 +468,17 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       if (delta?.audio) {
         const audioService = audioServiceRef.current;
         if (audioService) {
+          // participant 收到的 audio delta 应当全部是 AI 生成的 TTS, item.role 应为 'assistant'.
+          // 与 speaker 路径同款判断, 防御性保留 (若上游某天放 user audio 过来则不播以免回声).
           const shouldPlayAudio = item.role === 'assistant';
           audioService.addAudioData(delta.audio, 'ai-assistant', shouldPlayAudio, {
             itemId: item.id,
             sequenceNumber: delta.sequenceNumber,
             timestamp: delta.timestamp
           });
+          // verify-tts-audio-delta.mjs 计数: 入队成功才触发 (audioService=null 时不计)
+          window.dispatchEvent(new CustomEvent('sokuji:participant-audio-delta'));
         }
-        // 顺手 dispatch 测试事件 (verify-tts-audio-delta.mjs 用来计数)
-        window.dispatchEvent(new CustomEvent('sokuji:participant-audio-delta'));
         return;
       }
 
