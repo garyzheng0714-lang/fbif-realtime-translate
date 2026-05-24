@@ -79,6 +79,7 @@ import useTimelineStore from '../../stores/timelineStore';
 import { requestCaptions, requestYouTubeVideoTimeFromActiveTab } from '../../lib/youtube-timeline/requestCaptions';
 import { getActiveCue, getCueWindow } from '../../lib/youtube-timeline/timelineScheduler';
 import { TimelineTts } from '../../lib/youtube-timeline/timelineTts';
+import { translateTimelineCues, TranslationEngineTimelineTranslator } from '../../lib/youtube-timeline/timelineTranslate';
 import type { TimelineCue } from '../../lib/youtube-timeline/types';
 
 
@@ -886,6 +887,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   // Reference to audio service for accessing ModernAudioPlayer
   const audioServiceRef = useRef<IAudioService | null>(null);
   const timelineTtsRef = useRef<TimelineTts | null>(null);
+  const timelineTranslatorRef = useRef<TranslationEngineTimelineTranslator | null>(null);
   const timelinePreparedAudioRef = useRef<Map<string, PreparedTimelineAudio>>(new Map());
   const timelineGeneratingCueIdsRef = useRef<Set<string>>(new Set());
   const timelineQueuedCueIdsRef = useRef<Set<string>>(new Set());
@@ -1176,6 +1178,8 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     timelineGeneratingCueIdsRef.current.clear();
     timelineQueuedCueIdsRef.current.clear();
     timelineLastVideoTimeMsRef.current = null;
+    timelineTranslatorRef.current?.dispose();
+    timelineTranslatorRef.current = null;
     timelineTtsRef.current?.dispose();
     timelineTtsRef.current = null;
     audioServiceRef.current?.clearStreamingTrack('video-timeline-assistant');
@@ -1225,7 +1229,21 @@ const MainPanel: React.FC<MainPanelProps> = () => {
 
       const response = await requestCaptions();
       if (!isTimelineSessionActive()) return;
-      setTimelineCaptionsReady(response);
+      const translator = new TranslationEngineTimelineTranslator({
+        sourceLanguage: response.sourceLanguage || 'en',
+      });
+      timelineTranslatorRef.current = translator;
+      const translatedCues = await translateTimelineCues(response.cues, translator, 'zh');
+      translator.dispose();
+      if (timelineTranslatorRef.current === translator) {
+        timelineTranslatorRef.current = null;
+      }
+      if (!isTimelineSessionActive()) return;
+      const timelineResponse = {
+        ...response,
+        cues: translatedCues,
+      };
+      setTimelineCaptionsReady(timelineResponse);
       timelineTtsRef.current = new TimelineTts();
       setIsSessionActive(true);
 
@@ -1247,7 +1265,10 @@ const MainPanel: React.FC<MainPanelProps> = () => {
             timelineTtsRef.current = new TimelineTts();
           }
           const tts = timelineTtsRef.current;
-          await tts.generateChinese(cue.translatedText ?? cue.sourceText, (chunk) => {
+          if (!cue.translatedText) {
+            throw new Error('视频同步模式字幕翻译缺失，已停止播放以避免朗读英文原文');
+          }
+          await tts.generateChinese(cue.translatedText, (chunk) => {
             if (!isTimelineSessionActive()) return;
             chunks.push(chunk.samples);
           });
@@ -1295,7 +1316,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         const videoTime = await requestYouTubeVideoTimeFromActiveTab();
         if (!isTimelineSessionActive()) return;
 
-        if (videoTime.videoId !== response.videoId) {
+        if (videoTime.videoId !== timelineResponse.videoId) {
           failTimeline(new Error(switchedVideoMessage));
           return;
         }
@@ -1307,7 +1328,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         }
         timelineLastVideoTimeMsRef.current = currentTimeMs;
 
-        const activeCue = getActiveCue(response.cues, currentTimeMs);
+        const activeCue = getActiveCue(timelineResponse.cues, currentTimeMs);
         setTimelinePlaying(activeCue?.id ?? null);
 
         for (const [cueId, prepared] of timelinePreparedAudioRef.current) {
@@ -1316,7 +1337,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
           }
         }
 
-        const cueWindow = getCueWindow(response.cues, currentTimeMs, prebufferMs);
+        const cueWindow = getCueWindow(timelineResponse.cues, currentTimeMs, prebufferMs);
         for (const cue of cueWindow) {
           prepareCueAudio(cue).catch((error) => {
             if (generation !== timelineSessionGenerationRef.current) return;
@@ -1358,6 +1379,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
                 startMs: cue.startMs,
                 endMs: cue.endMs,
                 sourceText: cue.sourceText,
+                translatedText: cue.translatedText,
               });
             }
           }
