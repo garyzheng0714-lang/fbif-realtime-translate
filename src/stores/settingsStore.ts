@@ -1217,7 +1217,7 @@ const useSettingsStore = create<SettingsStore>()(
         const ast2Settings = currentSettings as VolcengineAST2Settings;
         apiKey = String(ast2Settings.appId || '');
 
-        if (!ast2Settings.appId || !ast2Settings.accessToken) {
+        if (!ast2Settings.appId) {
           set({
             isApiKeyValid: null,
             availableModels: [],

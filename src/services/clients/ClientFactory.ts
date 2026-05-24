@@ -137,12 +137,9 @@ export class ClientFactory {
         if (!isVolcengineAST2Enabled()) {
           throw new Error(`Provider ${provider} is not available in this build`);
         }
-        if (!clientSecret) {
-          throw new Error(`Access Token is required for ${provider} provider`);
-        }
         // Volcengine AST2 uses protobuf binary over WebSocket
-        // apiKey is the APP ID, clientSecret is the Access Token
-        return new VolcengineAST2Client(apiKey, clientSecret);
+        // apiKey is the new console API Key, or legacy APP ID when clientSecret is set
+        return new VolcengineAST2Client(apiKey, clientSecret || '');
 
       default:
         throw new Error(`Unsupported provider: ${provider}`);
@@ -170,4 +167,4 @@ export class ClientFactory {
     // OpenAI/OpenAI Compatible use native audio capture only in WebRTC mode
     return transportType === 'webrtc' && this.supportsWebRTC(provider);
   }
-} 
+}

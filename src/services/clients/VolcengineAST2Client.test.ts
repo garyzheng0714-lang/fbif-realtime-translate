@@ -6,7 +6,10 @@ vi.mock('../../locales', () => ({
 }));
 
 // Dynamic import after mocks
-const { buildCorpusFromConfig } = await import('./VolcengineAST2Client');
+const {
+  buildCorpusFromConfig,
+  buildVolcengineAST2AuthHeaders,
+} = await import('./VolcengineAST2Client');
 
 const baseConfig = {
   provider: 'volcengine_ast2' as const,
@@ -74,6 +77,35 @@ describe('buildCorpusFromConfig', () => {
       boostingTableId: 'hot-1',
       regexCorrectTableId: 'rep-2',
       glossaryTableId: 'gloss-3',
+    });
+  });
+});
+
+describe('buildVolcengineAST2AuthHeaders', () => {
+  it('uses the new single API key header when no legacy access token is configured', () => {
+    expect(buildVolcengineAST2AuthHeaders(
+      '  api-key-1  ',
+      '',
+      'volc.service_type.10053',
+      'connect-1'
+    )).toEqual({
+      'X-Api-Key': 'api-key-1',
+      'X-Api-Resource-Id': 'volc.service_type.10053',
+      'X-Api-Connect-Id': 'connect-1',
+    });
+  });
+
+  it('keeps the legacy APP ID and access token headers when a legacy token is configured', () => {
+    expect(buildVolcengineAST2AuthHeaders(
+      ' app-id-1 ',
+      ' access-token-1 ',
+      'volc.service_type.10053',
+      'connect-2'
+    )).toEqual({
+      'X-Api-App-Key': 'app-id-1',
+      'X-Api-Access-Key': 'access-token-1',
+      'X-Api-Resource-Id': 'volc.service_type.10053',
+      'X-Api-Connect-Id': 'connect-2',
     });
   });
 });

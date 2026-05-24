@@ -468,6 +468,10 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       if (delta?.audio) {
         const audioService = audioServiceRef.current;
         if (audioService) {
+          // FBIF fork: this product is for listening to translated podcast audio.
+          // Participant capture and monitor output are mutually exclusive in the
+          // upstream meeting UI, so force the player volume on for translated TTS.
+          audioService.setMonitorVolume(true);
           // participant 收到的 audio delta 应当全部是 AI 生成的 TTS, item.role 应为 'assistant'.
           // 与 speaker 路径同款判断, 防御性保留 (若上游某天放 user audio 过来则不播以免回声).
           const shouldPlayAudio = item.role === 'assistant';
@@ -510,7 +514,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   }), [addRealtimeEvent, trackEvent, provider]);
 
   /**
-   * Helper to create session config for participant mode (swapped languages, text-only, semantic VAD)
+   * Helper to create session config for participant mode (swapped languages, TTS, semantic VAD)
    */
   const createParticipantSessionConfig = useCallback((): SessionConfig | null => {
     const swappedSystemInstructions = provider === Provider.LOCAL_INFERENCE
@@ -1597,7 +1601,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
             systemAudioClientRef.current = null;
           } else {
             await participantClient.connect(participantSessionConfig);
-            console.info(`[Sokuji] [MainPanel] Participant audio client connected (${captureMode}, text-only, swapped languages, semantic VAD)`);
+            console.info(`[Sokuji] [MainPanel] Participant audio client connected (${captureMode}, s2s TTS, swapped languages, semantic VAD)`);
 
             // Start recording from appropriate source based on environment
             let participantAudioCallbackCount = 0;

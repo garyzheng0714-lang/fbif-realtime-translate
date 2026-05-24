@@ -88,18 +88,19 @@ export class ClientOperations {
         }
         return await VolcengineSTClient.validateApiKeyAndFetchModels(apiKey, clientSecret);
       case Provider.VOLCENGINE_AST2:
-        // Volcengine AST2 requires both APP ID and Access Token
-        if (!clientSecret || !apiKey) {
+        // Volcengine AST2 supports the new single API Key contract.
+        // Legacy APP ID + Access Token still works when clientSecret is present.
+        if (!apiKey) {
           return {
             validation: {
               valid: false,
-              message: 'Both APP ID and Access Token are required for Doubao AST 2.0',
+              message: 'API Key is required for Doubao AST 2.0',
               validating: false
             },
             models: []
           };
         }
-        return await VolcengineAST2Client.validateApiKeyAndFetchModels(apiKey, clientSecret);
+        return await VolcengineAST2Client.validateApiKeyAndFetchModels(apiKey, clientSecret || '');
       default:
         throw new Error(`Unsupported provider: ${provider}`);
     }
@@ -148,4 +149,4 @@ export class ClientOperations {
   static isSupportedProvider(provider: string): provider is ProviderType {
     return SUPPORTED_PROVIDERS.includes(provider as ProviderType);
   }
-} 
+}

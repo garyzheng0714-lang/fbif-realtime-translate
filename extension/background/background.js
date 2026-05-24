@@ -260,14 +260,20 @@ let dnrUpdatePromise = Promise.resolve();
 
 async function volcengineSetDNRHeaders(credentials) {
   dnrUpdatePromise = dnrUpdatePromise.then(async () => {
-    const { appKey, accessKey, resourceId, connectId } = credentials;
+    const { apiKey, appKey, accessKey, resourceId, connectId } = credentials;
 
-    const headers = [
-      { header: 'X-Api-App-Key', value: appKey },
-      { header: 'X-Api-Access-Key', value: accessKey },
-      { header: 'X-Api-Resource-Id', value: resourceId },
-      { header: 'X-Api-Connect-Id', value: connectId },
-    ];
+    const headers = accessKey
+      ? [
+          { header: 'X-Api-App-Key', value: appKey },
+          { header: 'X-Api-Access-Key', value: accessKey },
+          { header: 'X-Api-Resource-Id', value: resourceId },
+          { header: 'X-Api-Connect-Id', value: connectId },
+        ]
+      : [
+          { header: 'X-Api-Key', value: apiKey || appKey },
+          { header: 'X-Api-Resource-Id', value: resourceId },
+          { header: 'X-Api-Connect-Id', value: connectId },
+        ];
 
     const rules = headers.map((h, i) => ({
       id: VOLCENGINE_DNR_RULE_ID_BASE + i,

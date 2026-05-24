@@ -517,14 +517,15 @@ const ProviderSection: React.FC<ProviderSectionProps> = ({
         </div>
       ) : provider !== Provider.KIZUNA_AI ? (
         provider === Provider.VOLCENGINE_AST2 ? (
-          // Volcengine AST2 requires both APP ID and Access Token
+          // New Volcengine console uses a single API Key. Legacy APP ID + Access Token
+          // still works when the second field is filled.
           <div className="volcengine-st-credentials-group">
             <div className="api-key-input-group">
               <input
                 type="text"
                 value={volcengineAST2Settings.appId}
                 onChange={(e) => updateVolcengineAST2Settings({ appId: e.target.value })}
-                placeholder={t('providers.volcengine_ast2.appIdPlaceholder', 'APP ID')}
+                placeholder={t('providers.volcengine_ast2.appIdPlaceholder', 'API Key / Legacy APP ID')}
                 className={`api-key-input ${isApiKeyValid === true ? 'valid' : isApiKeyValid === false ? 'invalid' : ''}`}
                 disabled={isSessionActive}
               />
@@ -534,14 +535,14 @@ const ProviderSection: React.FC<ProviderSectionProps> = ({
                 type="password"
                 value={volcengineAST2Settings.accessToken}
                 onChange={(e) => updateVolcengineAST2Settings({ accessToken: e.target.value })}
-                placeholder={t('providers.volcengine_ast2.accessTokenPlaceholder', 'Access Token')}
+                placeholder={t('providers.volcengine_ast2.accessTokenPlaceholder', 'Legacy Access Token (optional)')}
                 className={`api-key-input ${isApiKeyValid === true ? 'valid' : isApiKeyValid === false ? 'invalid' : ''}`}
                 disabled={isSessionActive}
               />
               <button
                 className="validate-button"
                 onClick={handleValidateApiKey}
-                disabled={!volcengineAST2Settings.appId || !volcengineAST2Settings.accessToken || isValidating || isSessionActive}
+                disabled={!volcengineAST2Settings.appId || isValidating || isSessionActive}
                 title={t('simpleSettings.validate')}
               >
                 {isValidating ? (

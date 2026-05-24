@@ -79,6 +79,33 @@ export function buildCorpusFromConfig(
   return Object.keys(corpus).length > 0 ? corpus : undefined;
 }
 
+export function buildVolcengineAST2AuthHeaders(
+  appIdOrApiKey: string,
+  accessToken: string,
+  resourceId: string,
+  connectId: string
+): Record<string, string> {
+  const key = String(appIdOrApiKey ?? '').trim();
+  const legacyToken = String(accessToken ?? '').trim();
+  const baseHeaders = {
+    'X-Api-Resource-Id': resourceId,
+    'X-Api-Connect-Id': connectId,
+  };
+
+  if (legacyToken) {
+    return {
+      'X-Api-App-Key': key,
+      'X-Api-Access-Key': legacyToken,
+      ...baseHeaders,
+    };
+  }
+
+  return {
+    'X-Api-Key': key,
+    ...baseHeaders,
+  };
+}
+
 export class VolcengineAST2Client implements IClient {
   private appId: string;
   private accessToken: string;
@@ -120,6 +147,19 @@ export class VolcengineAST2Client implements IClient {
     this.appId = appId;
     this.accessToken = accessToken;
     this.resourceId = resourceId;
+  }
+
+  private isLegacyAuth(): boolean {
+    return this.accessToken.trim().length > 0;
+  }
+
+  private buildAuthHeaders(connectId: string): Record<string, string> {
+    return buildVolcengineAST2AuthHeaders(
+      this.appId,
+      this.accessToken,
+      this.resourceId,
+      connectId
+    );
   }
 
   private generateItemId(prefix: string): string {
@@ -166,12 +206,7 @@ export class VolcengineAST2Client implements IClient {
     const host = new URL(WS_ENDPOINT).host;
     const result = await window.electron.invoke('ws-headers-set', {
       host,
-      headers: {
-        'X-Api-App-Key': this.appId,
-        'X-Api-Access-Key': this.accessToken,
-        'X-Api-Resource-Id': this.resourceId,
-        'X-Api-Connect-Id': this.connectionId,
-      },
+      headers: this.buildAuthHeaders(this.connectionId),
     });
 
     if (!result?.success) {
@@ -206,8 +241,9 @@ export class VolcengineAST2Client implements IClient {
         {
           type: 'VOLCENGINE_AST2_SET_HEADERS',
           credentials: {
-            appKey: this.appId,
-            accessKey: this.accessToken,
+            apiKey: this.appId,
+            appKey: this.isLegacyAuth() ? this.appId : undefined,
+            accessKey: this.isLegacyAuth() ? this.accessToken : undefined,
             resourceId: this.resourceId,
             connectId: this.connectionId,
           },
@@ -345,7 +381,7 @@ export class VolcengineAST2Client implements IClient {
     const requestPayload: any = {
       requestMeta: {
         Endpoint: 'volc.service_type.10053',
-        AppKey: this.appId,
+        ...(this.isLegacyAuth() ? { AppKey: this.appId } : {}),
         ResourceID: this.resourceId,
         ConnectionID: this.connectionId,
         SessionID: this.sessionId,
@@ -946,13 +982,6 @@ export class VolcengineAST2Client implements IClient {
         models: []
       };
     }
-    if (!accessTokenStr || accessTokenStr.trim().length === 0) {
-      return {
-        validation: { valid: false, message: 'Access Token is required', validating: false },
-        models: []
-      };
-    }
-
     const models: FilteredModel[] = [{
       id: 'ast-v2-s2s',
       type: 'realtime',
@@ -970,12 +999,12 @@ export class VolcengineAST2Client implements IClient {
         if (isElectron()) {
           const result = await window.electron.invoke('ws-headers-set', {
             host,
-            headers: {
-              'X-Api-App-Key': appIdStr.trim(),
-              'X-Api-Access-Key': accessTokenStr.trim(),
-              'X-Api-Resource-Id': 'volc.service_type.10053',
-              'X-Api-Connect-Id': connectionId,
-            },
+            headers: buildVolcengineAST2AuthHeaders(
+              appIdStr,
+              accessTokenStr,
+              'volc.service_type.10053',
+              connectionId
+            ),
           });
           if (!result?.success) {
             return {
@@ -990,8 +1019,9 @@ export class VolcengineAST2Client implements IClient {
               {
                 type: 'VOLCENGINE_AST2_SET_HEADERS',
                 credentials: {
-                  appKey: appIdStr.trim(),
-                  accessKey: accessTokenStr.trim(),
+                  apiKey: appIdStr.trim(),
+                  appKey: accessTokenStr.trim() ? appIdStr.trim() : undefined,
+                  accessKey: accessTokenStr.trim() || undefined,
                   resourceId: 'volc.service_type.10053',
                   connectId: connectionId,
                 },
@@ -1033,7 +1063,7 @@ export class VolcengineAST2Client implements IClient {
             const startReq = TranslateRequest.encode({
               requestMeta: {
                 Endpoint: 'volc.service_type.10053',
-                AppKey: appIdStr.trim(),
+                ...(accessTokenStr.trim() ? { AppKey: appIdStr.trim() } : {}),
                 ResourceID: 'volc.service_type.10053',
                 ConnectionID: connectionId,
                 SessionID: sessionId,
