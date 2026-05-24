@@ -6,6 +6,7 @@ interface FbifSimplePanelProps {
   translationMode: 'timeline' | 'streaming';
   targetLanguageLabel: string;
   timelineStatus: string;
+  timelineError: string | null;
   timelineCueCount: number;
   isSessionActive: boolean;
   isInitializing: boolean;
@@ -26,6 +27,7 @@ const FbifSimplePanel: React.FC<FbifSimplePanelProps> = ({
   translationMode,
   targetLanguageLabel,
   timelineStatus,
+  timelineError,
   timelineCueCount,
   isSessionActive,
   isInitializing,
@@ -74,7 +76,7 @@ const FbifSimplePanel: React.FC<FbifSimplePanelProps> = ({
           : '需设置';
 
   const topbarStatus = translationMode === 'timeline' ? timelineStatus : connectionText;
-  const subtitle = latestSubtitle || '暂无中文字幕';
+  const subtitle = timelineError || latestSubtitle || '暂无中文字幕';
   const cueCountText = timelineCueCount > 0 ? `${timelineCueCount} 条` : '等待';
   const modeSwitchDisabled = isSessionActive || isInitializing;
   const modeSwitchTitle = modeSwitchDisabled ? '运行中不能切换模式' : undefined;
@@ -141,7 +143,7 @@ const FbifSimplePanel: React.FC<FbifSimplePanelProps> = ({
             <span>{cueCountText}</span>
           </div>
           <div
-            className={`fbif-simple-panel__subtitle ${latestSubtitle ? '' : 'is-empty'}`}
+            className={`fbif-simple-panel__subtitle ${latestSubtitle || timelineError ? '' : 'is-empty'}`}
             aria-live="polite"
           >
             {subtitle}

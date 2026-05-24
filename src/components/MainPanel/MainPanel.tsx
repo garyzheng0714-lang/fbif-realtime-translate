@@ -75,7 +75,7 @@ import {
 import DisplaySettingsPopover from '../Display/DisplaySettingsPopover';
 import { usePlaybackStore, usePlaybackHighlight } from '../../stores/playbackStore';
 import FbifSimplePanel from './FbifSimplePanel';
-import useTimelineStore, { useTimelineActiveCueId, useTimelineCues, useTimelineStatus } from '../../stores/timelineStore';
+import useTimelineStore, { useTimelineActiveCueId, useTimelineCues, useTimelineError, useTimelineStatus } from '../../stores/timelineStore';
 import {
   requestCaptions,
   requestYouTubeVideoTimeFromActiveTab,
@@ -89,6 +89,8 @@ import {
 import { getActiveCue, getCueWindow } from '../../lib/youtube-timeline/timelineScheduler';
 import { TimelineTts } from '../../lib/youtube-timeline/timelineTts';
 import { getTimelineCuesToTranslate, translateTimelineCueBatch, TranslationEngineTimelineTranslator } from '../../lib/youtube-timeline/timelineTranslate';
+import { timelineCuesToConversationItems } from '../../lib/youtube-timeline/timelineConversationItems';
+import { getTimelineUserMessage } from '../../lib/youtube-timeline/timelineErrors';
 import type { TimelineCue } from '../../lib/youtube-timeline/types';
 
 
@@ -286,6 +288,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   const navigateToSettings = useNavigateToSettings();
   const translationMode = useTranslationMode();
   const timelineStoreStatus = useTimelineStatus();
+  const timelineError = useTimelineError();
   const timelineCues = useTimelineCues();
   const timelineActiveCueId = useTimelineActiveCueId();
   const setTimelineLoadingCaptions = useTimelineStore((state) => state.setLoadingCaptions);
@@ -1272,7 +1275,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
 
     const failTimeline = (error: unknown) => {
       if (generation !== timelineSessionGenerationRef.current) return;
-      const message = error instanceof Error ? error.message : 'Timeline session failed';
+      const message = getTimelineUserMessage(error);
       timelineStopRef.current = true;
       timelineSessionGenerationRef.current += 1;
       setTimelineError(message);
@@ -1309,6 +1312,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         ...response,
         cues: response.cues,
       };
+      const timelineConversationBaseTime = Date.now();
       setTimelineCaptionsReady(timelineResponse);
       timelineTranslatorRef.current = new TranslationEngineTimelineTranslator({
         sourceLanguage: response.sourceLanguage || 'en',
@@ -1321,10 +1325,12 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       );
 
       const updateTimelineCaptions = () => {
+        const translatedCues = getTranslatedTimelineCues();
         setTimelineCaptionsReady({
           ...timelineResponse,
-          cues: getTranslatedTimelineCues(),
+          cues: translatedCues,
         });
+        setSystemAudioItems(timelineCuesToConversationItems(translatedCues, timelineConversationBaseTime));
       };
 
       const recreateTranslator = () => {
@@ -3366,6 +3372,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
           translationMode={translationMode}
           targetLanguageLabel={targetLanguageLabel}
           timelineStatus={timelineStatus}
+          timelineError={translationMode === 'timeline' ? timelineError : null}
           timelineCueCount={timelineCueCount}
           isSessionActive={isSessionActive}
           isInitializing={isInitializing}
