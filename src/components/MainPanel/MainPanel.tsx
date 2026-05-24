@@ -75,7 +75,7 @@ import {
 import DisplaySettingsPopover from '../Display/DisplaySettingsPopover';
 import { usePlaybackStore, usePlaybackHighlight } from '../../stores/playbackStore';
 import FbifSimplePanel from './FbifSimplePanel';
-import useTimelineStore from '../../stores/timelineStore';
+import useTimelineStore, { useTimelineActiveCueId, useTimelineCues, useTimelineStatus } from '../../stores/timelineStore';
 import { requestCaptions, requestYouTubeVideoTimeFromActiveTab } from '../../lib/youtube-timeline/requestCaptions';
 import { getActiveCue, getCueWindow } from '../../lib/youtube-timeline/timelineScheduler';
 import { TimelineTts } from '../../lib/youtube-timeline/timelineTts';
@@ -276,6 +276,9 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   const createSessionConfig = useCreateSessionConfig();
   const navigateToSettings = useNavigateToSettings();
   const translationMode = useTranslationMode();
+  const timelineStoreStatus = useTimelineStatus();
+  const timelineCues = useTimelineCues();
+  const timelineActiveCueId = useTimelineActiveCueId();
   const setTimelineLoadingCaptions = useTimelineStore((state) => state.setLoadingCaptions);
   const setTimelineCaptionsReady = useTimelineStore((state) => state.setCaptionsReady);
   const setTimelinePlaying = useTimelineStore((state) => state.setPlaying);
@@ -3208,13 +3211,69 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   // Active source/target languages for badge labels (provider-agnostic).
   const sourceLanguage = currentSettings.sourceLanguage ?? 'EN';
   const targetLanguage = currentSettings.targetLanguage ?? 'EN';
+  const targetLanguageLabel = /^zh|chinese|中文/i.test(targetLanguage) ? '中文' : targetLanguage;
+  const timelineCueCount = timelineCues.length;
+  const timelineStatus = useMemo(() => {
+    if (translationMode !== 'timeline') {
+      return isSessionActive ? `转中文 ${sessionDuration}` : canStartSession ? '就绪' : '需设置';
+    }
+    if (isInitializing && timelineStoreStatus === 'idle') return '读取字幕';
+    if (isReconnecting) return '重新连接';
+    switch (timelineStoreStatus) {
+      case 'loading_captions':
+        return '读取字幕';
+      case 'captions_ready':
+        return timelineCueCount > 0 ? '字幕就绪' : '等待字幕';
+      case 'translating':
+        return '翻译中';
+      case 'prebuffering':
+        return '缓冲中';
+      case 'playing':
+        return isSessionActive ? `同步中 ${sessionDuration}` : '同步中';
+      case 'error':
+        return '出错';
+      case 'idle':
+      default:
+        return canStartSession ? '就绪' : '需设置';
+    }
+  }, [
+    canStartSession,
+    isInitializing,
+    isReconnecting,
+    isSessionActive,
+    sessionDuration,
+    timelineCueCount,
+    timelineStoreStatus,
+    translationMode,
+  ]);
   const latestSubtitle = useMemo(() => {
+    if (translationMode === 'timeline') {
+      const activeCue = timelineActiveCueId
+        ? timelineCues.find((cue) => cue.id === timelineActiveCueId)
+        : null;
+      const activeText = activeCue?.translatedText?.trim();
+      if (activeText) return activeText;
+
+      const activeIndex = activeCue
+        ? timelineCues.findIndex((cue) => cue.id === activeCue.id)
+        : timelineCues.length;
+      for (let i = Math.min(activeIndex, timelineCues.length - 1); i >= 0; i -= 1) {
+        const text = timelineCues[i].translatedText?.trim();
+        if (text) return text;
+      }
+      for (let i = timelineCues.length - 1; i >= 0; i -= 1) {
+        const text = timelineCues[i].translatedText?.trim();
+        if (text) return text;
+      }
+      return '';
+    }
+
     for (let i = filteredItems.length - 1; i >= 0; i -= 1) {
       const text = filteredItems[i].formatted?.transcript || filteredItems[i].formatted?.text;
       if (text) return text;
     }
     return '';
-  }, [filteredItems]);
+  }, [filteredItems, timelineActiveCueId, timelineCues, translationMode]);
   const siteLabel = useMemo(() => {
     const site = new URLSearchParams(window.location.search).get('site') || '';
     if (/youtube\.com|youtu\.be/i.test(site)) return '已识别 YouTube';
@@ -3236,6 +3295,10 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         <UpdateDialog />
         <FbifSimplePanel
           siteLabel={siteLabel}
+          translationMode={translationMode}
+          targetLanguageLabel={targetLanguageLabel}
+          timelineStatus={timelineStatus}
+          timelineCueCount={timelineCueCount}
           isSessionActive={isSessionActive}
           isInitializing={isInitializing}
           isReconnecting={isReconnecting}
@@ -3243,6 +3306,12 @@ const MainPanel: React.FC<MainPanelProps> = () => {
           sessionDuration={sessionDuration}
           latestSubtitle={latestSubtitle}
           initProgress={initProgress}
+          onSetMode={(mode) => {
+            void useSettingsStore.getState().setTranslationMode(mode);
+          }}
+          onEnterSubtitleOverlay={() => {
+            void useSettingsStore.getState().enterSubtitleMode();
+          }}
           onStart={connectConversation}
           onStop={disconnectConversation}
           onOpenSettings={() => navigateToSettings('provider')}
