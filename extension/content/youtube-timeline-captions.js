@@ -2,6 +2,7 @@
 
 const CAPTION_REQUEST_TYPE = 'fbif:youtube-timeline:get-captions';
 const VIDEO_TIME_REQUEST_TYPE = 'fbif:youtube-timeline:get-video-time';
+const ORIGINAL_AUDIO_MUTE_REQUEST_TYPE = 'fbif:youtube-timeline:set-original-audio-muted';
 
 function makeError(code, message) {
   return { ok: false, error: { code, message } };
@@ -229,9 +230,32 @@ function getVideoTime() {
   };
 }
 
+function setOriginalAudioMuted(muted) {
+  const video = document.querySelector('video');
+  if (!video) {
+    return makeError('no_video', 'No YouTube video element was found on this page.');
+  }
+
+  const previousMuted = video.muted;
+  video.muted = muted;
+
+  return {
+    ok: true,
+    payload: {
+      previousMuted,
+      currentMuted: video.muted,
+    },
+  };
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === VIDEO_TIME_REQUEST_TYPE) {
     sendResponse(getVideoTime());
+    return false;
+  }
+
+  if (message?.type === ORIGINAL_AUDIO_MUTE_REQUEST_TYPE) {
+    sendResponse(setOriginalAudioMuted(Boolean(message.muted)));
     return false;
   }
 

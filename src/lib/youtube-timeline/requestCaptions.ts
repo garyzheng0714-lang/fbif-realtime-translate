@@ -3,6 +3,7 @@ import type { TimelineError, YouTubeCaptionTrack, YouTubeTimelineResponse } from
 
 export const YOUTUBE_TIMELINE_CAPTION_REQUEST = 'fbif:youtube-timeline:get-captions';
 export const YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST = 'fbif:youtube-timeline:get-video-time';
+export const YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST = 'fbif:youtube-timeline:set-original-audio-muted';
 
 type TimelineErrorCode = TimelineError['code'];
 
@@ -11,6 +12,11 @@ export interface YouTubeVideoTimeResponse {
   durationMs: number | null;
   paused: boolean;
   videoId: string;
+}
+
+export interface YouTubeOriginalAudioMutedResponse {
+  previousMuted: boolean;
+  currentMuted: boolean;
 }
 
 interface ChromeTabsWithMessages {
@@ -107,7 +113,7 @@ function queryActiveTab(chromeApi: Chrome, tabs: ChromeTabsWithMessages): Promis
   });
 }
 
-function sendTimelineRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, tabId: number, type: string): Promise<unknown> {
+function sendTimelineRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, tabId: number, message: { type: string } & Record<string, unknown>): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (fn: () => void) => {
@@ -119,7 +125,7 @@ function sendTimelineRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, ta
     try {
       const maybePromise = tabs.sendMessage(
         tabId,
-        { type },
+        message,
         (response) => {
           const runtimeError = chromeApi.runtime.lastError;
           if (runtimeError) {
@@ -222,6 +228,27 @@ function parseVideoTimeResponse(response: unknown): YouTubeVideoTimeResponse {
   };
 }
 
+function parseOriginalAudioMutedResponse(response: unknown): YouTubeOriginalAudioMutedResponse {
+  if (!isRecord(response)) {
+    throw createTimelineError('caption_fetch_failed', 'Content script returned an invalid original audio mute response');
+  }
+
+  const responseError = getResponseError(response);
+  if (responseError) {
+    throw createTimelineError(responseError.code, responseError.message);
+  }
+
+  const payload = isRecord(response.payload) ? response.payload : response;
+  if (typeof payload.previousMuted !== 'boolean' || typeof payload.currentMuted !== 'boolean') {
+    throw createTimelineError('caption_fetch_failed', 'Content script returned an incomplete original audio mute response');
+  }
+
+  return {
+    previousMuted: payload.previousMuted,
+    currentMuted: payload.currentMuted,
+  };
+}
+
 async function getActiveYouTubeTab(): Promise<{ chromeApi: Chrome; tabs: ChromeTabsWithMessages; tab: ChromeTab; videoId: string }> {
   const { chromeApi, tabs } = getChromeTabs();
   const [tab] = await queryActiveTab(chromeApi, tabs);
@@ -244,7 +271,7 @@ export async function requestCaptions(): Promise<YouTubeTimelineResponse> {
   const { chromeApi, tabs, tab, videoId } = await getActiveYouTubeTab();
 
   try {
-    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, YOUTUBE_TIMELINE_CAPTION_REQUEST);
+    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, { type: YOUTUBE_TIMELINE_CAPTION_REQUEST });
     return parseTimelineResponse(response, tab, videoId);
   } catch (error) {
     if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
@@ -262,7 +289,7 @@ export async function requestYouTubeVideoTimeFromActiveTab(): Promise<YouTubeVid
   const { chromeApi, tabs, tab } = await getActiveYouTubeTab();
 
   try {
-    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST);
+    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, { type: YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST });
     return parseVideoTimeResponse(response);
   } catch (error) {
     if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
@@ -272,6 +299,27 @@ export async function requestYouTubeVideoTimeFromActiveTab(): Promise<YouTubeVid
       throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
     }
     const message = error instanceof Error ? error.message : 'Failed to request YouTube video time';
+    throw createTimelineError('caption_fetch_failed', message);
+  }
+}
+
+export async function setYouTubeOriginalAudioMutedFromActiveTab(muted: boolean): Promise<YouTubeOriginalAudioMutedResponse> {
+  const { chromeApi, tabs, tab } = await getActiveYouTubeTab();
+
+  try {
+    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, {
+      type: YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST,
+      muted,
+    });
+    return parseOriginalAudioMutedResponse(response);
+  } catch (error) {
+    if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
+      throw error;
+    }
+    if (isRecord(error) && isTimelineErrorCode(error.code)) {
+      throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
+    }
+    const message = error instanceof Error ? error.message : 'Failed to set YouTube original audio muted state';
     throw createTimelineError('caption_fetch_failed', message);
   }
 }

@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   requestCaptions,
+  setYouTubeOriginalAudioMutedFromActiveTab,
   requestYouTubeVideoTimeFromActiveTab,
   YOUTUBE_TIMELINE_CAPTION_REQUEST,
+  YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST,
   YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST,
 } from './requestCaptions';
 
@@ -138,6 +140,43 @@ describe('requestCaptions', () => {
     });
 
     await expect(requestYouTubeVideoTimeFromActiveTab()).rejects.toMatchObject({
+      code: 'no_video',
+      message: 'No video element was found.',
+    });
+  });
+
+  it('sets the active YouTube tab original audio muted state through the content script', async () => {
+    const { sendMessage } = installChromeMock({
+      ok: true,
+      payload: {
+        previousMuted: false,
+        currentMuted: true,
+      },
+    });
+
+    const result = await setYouTubeOriginalAudioMutedFromActiveTab(true);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      activeYouTubeTab.id,
+      { type: YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST, muted: true },
+      expect.any(Function),
+    );
+    expect(result).toEqual({
+      previousMuted: false,
+      currentMuted: true,
+    });
+  });
+
+  it('preserves content script error codes when original audio mute has no video element', async () => {
+    installChromeMock({
+      ok: false,
+      error: {
+        code: 'no_video',
+        message: 'No video element was found.',
+      },
+    });
+
+    await expect(setYouTubeOriginalAudioMutedFromActiveTab(true)).rejects.toMatchObject({
       code: 'no_video',
       message: 'No video element was found.',
     });

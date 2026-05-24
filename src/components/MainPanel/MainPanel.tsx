@@ -76,7 +76,11 @@ import DisplaySettingsPopover from '../Display/DisplaySettingsPopover';
 import { usePlaybackStore, usePlaybackHighlight } from '../../stores/playbackStore';
 import FbifSimplePanel from './FbifSimplePanel';
 import useTimelineStore, { useTimelineActiveCueId, useTimelineCues, useTimelineStatus } from '../../stores/timelineStore';
-import { requestCaptions, requestYouTubeVideoTimeFromActiveTab } from '../../lib/youtube-timeline/requestCaptions';
+import {
+  requestCaptions,
+  requestYouTubeVideoTimeFromActiveTab,
+  setYouTubeOriginalAudioMutedFromActiveTab,
+} from '../../lib/youtube-timeline/requestCaptions';
 import { getActiveCue, getCueWindow } from '../../lib/youtube-timeline/timelineScheduler';
 import { TimelineTts } from '../../lib/youtube-timeline/timelineTts';
 import { getTimelineCuesToTranslate, translateTimelineCueBatch, TranslationEngineTimelineTranslator } from '../../lib/youtube-timeline/timelineTranslate';
@@ -901,6 +905,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   const timelineSessionGenerationRef = useRef<number>(0);
   const timelineTranslationGenerationRef = useRef<number>(0);
   const timelineTickTimeoutRef = useRef<number | null>(null);
+  const timelineOriginalAudioMutedRef = useRef<{ previousMuted: boolean } | null>(null);
 
   // Reference to track push-to-talk duration
   const pushToTalkStartTimeRef = useRef<number | null>(null);
@@ -1194,6 +1199,38 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     audioServiceRef.current?.clearStreamingTrack('video-timeline-assistant');
   }, []);
 
+  const restoreTimelineOriginalAudio = useCallback(async (reason: string) => {
+    const mutedState = timelineOriginalAudioMutedRef.current;
+    if (!mutedState) return;
+
+    try {
+      await setYouTubeOriginalAudioMutedFromActiveTab(mutedState.previousMuted);
+      timelineOriginalAudioMutedRef.current = null;
+    } catch (error) {
+      console.warn(`[Sokuji] [MainPanel] Failed to restore YouTube original audio after ${reason}:`, error);
+      addRealtimeEvent(
+        {
+          type: 'session.init_error',
+          data: {
+            reason,
+            message: error instanceof Error ? error.message : String(error),
+            error: String(error),
+          },
+        },
+        'client',
+        'session.init_error'
+      );
+    }
+  }, [addRealtimeEvent]);
+
+  const muteTimelineOriginalAudio = useCallback(async () => {
+    const mutedState = await setYouTubeOriginalAudioMutedFromActiveTab(true);
+    timelineOriginalAudioMutedRef.current = { previousMuted: mutedState.previousMuted };
+    if (!mutedState.currentMuted) {
+      throw new Error('YouTube original audio could not be muted for timeline mode');
+    }
+  }, []);
+
   const startTimelineConversation = useCallback(async () => {
     const tickMs = 350;
     const prebufferMs = 10_000;
@@ -1222,9 +1259,11 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       );
       setIsSessionActive(false);
       resetTimelineAudioRuntime();
+      void restoreTimelineOriginalAudio('timeline failure');
     };
 
     try {
+      await restoreTimelineOriginalAudio('timeline restart');
       timelineStopRef.current = false;
       resetTimelineAudioRuntime();
       setItems([]);
@@ -1238,6 +1277,11 @@ const MainPanel: React.FC<MainPanelProps> = () => {
 
       const response = await requestCaptions();
       if (!isTimelineSessionActive()) return;
+      await muteTimelineOriginalAudio();
+      if (!isTimelineSessionActive()) {
+        await restoreTimelineOriginalAudio('timeline start canceled');
+        return;
+      }
       const timelineResponse = {
         ...response,
         cues: response.cues,
@@ -1468,6 +1512,8 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   }, [
     addRealtimeEvent,
     resetTimelineAudioRuntime,
+    restoreTimelineOriginalAudio,
+    muteTimelineOriginalAudio,
     setTimelineCaptionsReady,
     setTimelineError,
     setTimelineLoadingCaptions,
@@ -1500,6 +1546,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       pendingTextRef.current = null;
       timelineSessionGenerationRef.current += 1;
       timelineStopRef.current = true;
+      await restoreTimelineOriginalAudio('disconnect');
       resetTimelineAudioRuntime();
       useTimelineStore.getState().resetTimeline();
 
@@ -1612,7 +1659,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     } finally {
       disconnectInProgressRef.current = false;
     }
-  }, [refetchAll, resetTimelineAudioRuntime, setIsReconnecting]);
+  }, [refetchAll, resetTimelineAudioRuntime, restoreTimelineOriginalAudio, setIsReconnecting]);
 
   // Keep the ref in sync so client onClose handlers can call disconnectConversation
   // without creating a useCallback dep cycle. The ref is read inside async event
