@@ -63,23 +63,37 @@ describe('settingsStore', () => {
   });
 
   describe('FBIF language defaults', () => {
-    it('migrates the upstream Volcengine AST2 zh-to-en default to English-to-Chinese', async () => {
+    it('keeps Volcengine AST2 as my Chinese language to counterpart English language by default', async () => {
       mockGetSetting.mockImplementation(async (key: string, defaultValue: unknown) => {
         if (key === 'settings.common.uiLanguage') return 'zh_CN';
         if (key === 'settings.fbif.uiLanguageMigratedToZhCN') return true;
-        if (key === 'settings.volcengineAST2.sourceLanguage') return 'zh';
-        if (key === 'settings.volcengineAST2.targetLanguage') return 'en';
-        if (key === 'settings.fbif.volcengineAST2LanguageMigratedToEnZh') return false;
         return defaultValue;
       });
 
       await useSettingsStore.getState().loadSettings();
 
-      expect(useSettingsStore.getState().volcengineAST2.sourceLanguage).toBe('en');
-      expect(useSettingsStore.getState().volcengineAST2.targetLanguage).toBe('zh');
-      expect(mockSetSetting).toHaveBeenCalledWith('settings.volcengineAST2.sourceLanguage', 'en');
-      expect(mockSetSetting).toHaveBeenCalledWith('settings.volcengineAST2.targetLanguage', 'zh');
-      expect(mockSetSetting).toHaveBeenCalledWith('settings.fbif.volcengineAST2LanguageMigratedToEnZh', true);
+      expect(useSettingsStore.getState().volcengineAST2.sourceLanguage).toBe('zh');
+      expect(useSettingsStore.getState().volcengineAST2.targetLanguage).toBe('en');
+    });
+
+    it('reverts the previous mistaken AST2 en-to-zh migration because participant capture swaps direction', async () => {
+      mockGetSetting.mockImplementation(async (key: string, defaultValue: unknown) => {
+        if (key === 'settings.common.uiLanguage') return 'zh_CN';
+        if (key === 'settings.fbif.uiLanguageMigratedToZhCN') return true;
+        if (key === 'settings.volcengineAST2.sourceLanguage') return 'en';
+        if (key === 'settings.volcengineAST2.targetLanguage') return 'zh';
+        if (key === 'settings.fbif.volcengineAST2LanguageMigratedToEnZh') return true;
+        if (key === 'settings.fbif.volcengineAST2LanguageRevertedToZhEn') return false;
+        return defaultValue;
+      });
+
+      await useSettingsStore.getState().loadSettings();
+
+      expect(useSettingsStore.getState().volcengineAST2.sourceLanguage).toBe('zh');
+      expect(useSettingsStore.getState().volcengineAST2.targetLanguage).toBe('en');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.volcengineAST2.sourceLanguage', 'zh');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.volcengineAST2.targetLanguage', 'en');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.fbif.volcengineAST2LanguageRevertedToZhEn', true);
     });
   });
 

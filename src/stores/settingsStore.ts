@@ -326,8 +326,8 @@ const defaultVolcengineSTSettings: VolcengineSTSettings = {
 const defaultVolcengineAST2Settings: VolcengineAST2Settings = {
   appId: '',
   accessToken: '',
-  sourceLanguage: 'en',
-  targetLanguage: 'zh',
+  sourceLanguage: 'zh',
+  targetLanguage: 'en',
   turnDetectionMode: 'Auto',
   hotWordTableId: '',
   replacementTableId: '',
@@ -1463,17 +1463,18 @@ const useSettingsStore = create<SettingsStore>()(
         ]);
 
         const migratedAST2Language = await service.getSetting('settings.fbif.volcengineAST2LanguageMigratedToEnZh', false);
-        if (!migratedAST2Language && volcengineAST2.sourceLanguage === 'zh' && volcengineAST2.targetLanguage === 'en') {
-          volcengineAST2.sourceLanguage = 'en';
-          volcengineAST2.targetLanguage = 'zh';
+        const revertedAST2Language = await service.getSetting('settings.fbif.volcengineAST2LanguageRevertedToZhEn', false);
+        if (migratedAST2Language && !revertedAST2Language && volcengineAST2.sourceLanguage === 'en' && volcengineAST2.targetLanguage === 'zh') {
+          volcengineAST2.sourceLanguage = 'zh';
+          volcengineAST2.targetLanguage = 'en';
           try {
             await Promise.all([
-              service.setSetting('settings.volcengineAST2.sourceLanguage', 'en'),
-              service.setSetting('settings.volcengineAST2.targetLanguage', 'zh'),
-              service.setSetting('settings.fbif.volcengineAST2LanguageMigratedToEnZh', true),
+              service.setSetting('settings.volcengineAST2.sourceLanguage', 'zh'),
+              service.setSetting('settings.volcengineAST2.targetLanguage', 'en'),
+              service.setSetting('settings.fbif.volcengineAST2LanguageRevertedToZhEn', true),
             ]);
           } catch (error) {
-            console.warn('[SettingsStore] Failed to persist FBIF AST2 language migration:', error);
+            console.warn('[SettingsStore] Failed to persist FBIF AST2 language correction:', error);
           }
         }
 
