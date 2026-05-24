@@ -3254,14 +3254,12 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       const activeText = activeCue?.translatedText?.trim();
       if (activeText) return activeText;
 
-      const activeIndex = activeCue
-        ? timelineCues.findIndex((cue) => cue.id === activeCue.id)
-        : timelineCues.length;
-      for (let i = Math.min(activeIndex, timelineCues.length - 1); i >= 0; i -= 1) {
-        const text = timelineCues[i].translatedText?.trim();
-        if (text) return text;
-      }
-      for (let i = timelineCues.length - 1; i >= 0; i -= 1) {
+      if (!activeCue) return '';
+
+      const activeIndex = timelineCues.findIndex((cue) => cue.id === activeCue.id);
+      if (activeIndex < 0) return '';
+
+      for (let i = activeIndex - 1; i >= 0; i -= 1) {
         const text = timelineCues[i].translatedText?.trim();
         if (text) return text;
       }
@@ -3307,10 +3305,27 @@ const MainPanel: React.FC<MainPanelProps> = () => {
           latestSubtitle={latestSubtitle}
           initProgress={initProgress}
           onSetMode={(mode) => {
-            void useSettingsStore.getState().setTranslationMode(mode);
+            if (isSessionActive || isInitializing) return;
+            useSettingsStore.getState().setTranslationMode(mode).catch((error) => {
+              const message = error instanceof Error ? error.message : '切换模式失败';
+              console.warn('[MainPanel] Failed to switch translation mode:', error);
+              addRealtimeEvent(
+                { type: 'settings.translation_mode_error', data: { message } },
+                'client',
+                'settings.translation_mode_error'
+              );
+            });
           }}
           onEnterSubtitleOverlay={() => {
-            void useSettingsStore.getState().enterSubtitleMode();
+            useSettingsStore.getState().enterSubtitleMode().catch((error) => {
+              const message = error instanceof Error ? error.message : '进入字幕浮层失败';
+              console.error('[MainPanel] Failed to enter subtitle overlay:', error);
+              addRealtimeEvent(
+                { type: 'subtitle.enter_error', data: { message } },
+                'client',
+                'subtitle.enter_error'
+              );
+            });
           }}
           onStart={connectConversation}
           onStop={disconnectConversation}

@@ -76,6 +76,8 @@ const FbifSimplePanel: React.FC<FbifSimplePanelProps> = ({
   const topbarStatus = translationMode === 'timeline' ? timelineStatus : connectionText;
   const subtitle = latestSubtitle || '暂无中文字幕';
   const cueCountText = timelineCueCount > 0 ? `${timelineCueCount} 条` : '等待';
+  const modeSwitchDisabled = isSessionActive || isInitializing;
+  const modeSwitchTitle = modeSwitchDisabled ? '运行中不能切换模式' : undefined;
 
   return (
     <div className="fbif-simple-panel">
@@ -107,6 +109,9 @@ const FbifSimplePanel: React.FC<FbifSimplePanelProps> = ({
             className={translationMode === 'timeline' ? 'is-active' : ''}
             onClick={() => onSetMode('timeline')}
             aria-pressed={translationMode === 'timeline'}
+            aria-disabled={modeSwitchDisabled}
+            disabled={modeSwitchDisabled}
+            title={modeSwitchTitle}
           >
             视频同步
           </button>
@@ -115,6 +120,9 @@ const FbifSimplePanel: React.FC<FbifSimplePanelProps> = ({
             className={translationMode === 'streaming' ? 'is-active' : ''}
             onClick={() => onSetMode('streaming')}
             aria-pressed={translationMode === 'streaming'}
+            aria-disabled={modeSwitchDisabled}
+            disabled={modeSwitchDisabled}
+            title={modeSwitchTitle}
           >
             实时翻译
           </button>
