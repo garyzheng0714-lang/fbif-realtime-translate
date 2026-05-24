@@ -1416,13 +1416,14 @@ const useSettingsStore = create<SettingsStore>()(
         const provider = await service.getSetting('settings.common.provider', defaultCommonSettings.provider);
         let uiLanguage = await service.getSetting('settings.common.uiLanguage', defaultCommonSettings.uiLanguage);
         const migratedToChineseUI = await service.getSetting('settings.fbif.uiLanguageMigratedToZhCN', false);
-        if (!migratedToChineseUI && uiLanguage === 'en') {
+        if (uiLanguage === 'en') {
           uiLanguage = 'zh_CN';
           try {
-            await Promise.all([
-              service.setSetting('settings.common.uiLanguage', uiLanguage),
-              service.setSetting('settings.fbif.uiLanguageMigratedToZhCN', true),
-            ]);
+            const migrationWrites = [service.setSetting('settings.common.uiLanguage', uiLanguage)];
+            if (!migratedToChineseUI) {
+              migrationWrites.push(service.setSetting('settings.fbif.uiLanguageMigratedToZhCN', true));
+            }
+            await Promise.all(migrationWrites);
           } catch (error) {
             console.warn('[SettingsStore] Failed to persist FBIF Chinese UI migration:', error);
           }

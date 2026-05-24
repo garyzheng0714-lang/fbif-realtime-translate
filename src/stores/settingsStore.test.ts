@@ -60,6 +60,19 @@ describe('settingsStore', () => {
       expect(mockSetSetting).toHaveBeenCalledWith('settings.common.uiLanguage', 'zh_CN');
       expect(mockSetSetting).toHaveBeenCalledWith('settings.fbif.uiLanguageMigratedToZhCN', true);
     });
+
+    it('repairs a stale English UI setting even after the migration flag was written', async () => {
+      mockGetSetting.mockImplementation(async (key: string, defaultValue: unknown) => {
+        if (key === 'settings.common.uiLanguage') return 'en';
+        if (key === 'settings.fbif.uiLanguageMigratedToZhCN') return true;
+        return defaultValue;
+      });
+
+      await useSettingsStore.getState().loadSettings();
+
+      expect(useSettingsStore.getState().uiLanguage).toBe('zh_CN');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.common.uiLanguage', 'zh_CN');
+    });
   });
 
   describe('FBIF language defaults', () => {
