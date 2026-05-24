@@ -92,15 +92,32 @@ function parsePlayerResponseFromScript(scriptText) {
   return null;
 }
 
-function findPlayerResponse() {
+function getPlayerResponseVideoId(playerResponse) {
+  return (
+    playerResponse?.videoDetails?.videoId ||
+    playerResponse?.microformat?.playerMicroformatRenderer?.externalVideoId ||
+    ''
+  );
+}
+
+function findPlayerResponse(urlVideoId) {
   const scripts = Array.from(document.scripts).reverse();
+  let foundStaleResponse = false;
+
   for (const script of scripts) {
     const text = script.textContent || '';
     if (!text.includes('ytInitialPlayerResponse')) continue;
     const response = parsePlayerResponseFromScript(text);
-    if (response) return response;
+    if (!response) continue;
+
+    if (getPlayerResponseVideoId(response) === urlVideoId) {
+      return { playerResponse: response, foundStaleResponse };
+    }
+
+    foundStaleResponse = true;
   }
-  return null;
+
+  return { playerResponse: null, foundStaleResponse };
 }
 
 function readCaptionTracks(playerResponse) {
@@ -154,13 +171,16 @@ async function fetchJson3(track) {
 }
 
 async function getCaptions() {
-  const playerResponse = findPlayerResponse();
-  const videoId =
-    playerResponse?.videoDetails?.videoId ||
-    playerResponse?.microformat?.playerMicroformatRenderer?.externalVideoId ||
-    getCurrentUrlVideoId();
+  const urlVideoId = getCurrentUrlVideoId();
+  if (!urlVideoId) {
+    return makeError('no_video', 'No YouTube video ID was found in the current page URL.');
+  }
 
-  if (!playerResponse || !videoId) {
+  const { playerResponse, foundStaleResponse } = findPlayerResponse(urlVideoId);
+  if (!playerResponse) {
+    if (foundStaleResponse) {
+      return makeError('no_video', '当前 YouTube 页面状态尚未同步，请稍后重试。');
+    }
     return makeError('no_video', 'No YouTube video player response was found on this page.');
   }
 
@@ -176,7 +196,7 @@ async function getCaptions() {
     return {
       ok: true,
       payload: {
-        videoId,
+        videoId: urlVideoId,
         title: playerResponse?.videoDetails?.title || document.title || '',
         sourceLanguage: selectedTrack.languageCode,
         tracks,
