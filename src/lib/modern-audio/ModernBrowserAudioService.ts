@@ -1266,8 +1266,9 @@ export class ModernBrowserAudioService implements IAudioService {
    * Called when session starts with tab audio enabled
    * @param callback Function to receive audio data chunks
    * @param outputDeviceId Optional output device ID for audio playback
+   * @param passthrough Whether to route captured tab audio back to speakers
    */
-  public async startTabAudioRecording(callback: AudioRecordingCallback, outputDeviceId?: string): Promise<void> {
+  public async startTabAudioRecording(callback: AudioRecordingCallback, outputDeviceId?: string, passthrough: boolean = true): Promise<void> {
     if (!isExtension()) {
       throw new Error('Tab audio capture is only supported in browser extension');
     }
@@ -1293,7 +1294,7 @@ export class ModernBrowserAudioService implements IAudioService {
       this.tabAudioCallback = callback;
 
       // Start the recorder with optional output device (using ParticipantAudioOptions)
-      const success = await this.tabAudioRecorder.begin({ tabId: tabId || undefined, outputDeviceId });
+      const success = await this.tabAudioRecorder.begin({ tabId: tabId || undefined, outputDeviceId, passthrough });
       if (!success) {
         throw new Error('Failed to begin tab audio capture');
       }
@@ -1359,16 +1360,16 @@ export class ModernBrowserAudioService implements IAudioService {
    * - Extension: uses tab audio capture via Chrome tabCapture API
    * - Electron: uses system audio capture via PipeWire/PulseAudio loopback
    * @param callback Function to receive audio data chunks
-   * @param options Optional configuration (outputDeviceId for passthrough)
+   * @param options Optional configuration (outputDeviceId and passthrough)
    */
   public async startParticipantAudioRecording(
     callback: AudioRecordingCallback,
-    options?: { outputDeviceId?: string }
+    options?: { outputDeviceId?: string; passthrough?: boolean }
   ): Promise<void> {
     // Extension environment: use tab audio capture
     if (isExtension()) {
       console.info('[Sokuji] [ModernBrowserAudio] Starting participant audio via tab capture');
-      return this.startTabAudioRecording(callback, options?.outputDeviceId);
+      return this.startTabAudioRecording(callback, options?.outputDeviceId, options?.passthrough);
     }
 
     // Electron environment: use system audio capture

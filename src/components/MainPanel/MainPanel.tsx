@@ -1618,10 +1618,12 @@ const MainPanel: React.FC<MainPanelProps> = () => {
             if (isExtension()) {
               // Extension: start tab audio recording with optional output device for passthrough
               const outputDeviceId = participantAudioOutputDevice?.deviceId;
-              console.info('[Sokuji] [MainPanel] Starting tab audio recording with output device:', outputDeviceId || 'default');
+              const passthroughOriginalAudio = false;
+              console.info('[Sokuji] [MainPanel] Starting tab audio recording with output device:', outputDeviceId || 'default', 'passthrough:', passthroughOriginalAudio);
               await audioServiceRef.current.startTabAudioRecording(
                 createAudioDataCallback(participantClient),
-                outputDeviceId
+                outputDeviceId,
+                passthroughOriginalAudio
               );
             } else {
               // Electron: start system audio recording from virtual mic

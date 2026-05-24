@@ -11,6 +11,8 @@ export interface ParticipantAudioOptions {
   tabId?: number;
   /** Output device ID for audio passthrough (mainly for tab capture) */
   outputDeviceId?: string;
+  /** Whether captured tab audio should be routed back to speakers */
+  passthrough?: boolean;
 }
 
 export interface AudioDataCallback {

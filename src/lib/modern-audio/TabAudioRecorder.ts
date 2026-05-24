@@ -12,13 +12,14 @@ export class TabAudioRecorder extends ParticipantRecorder {
   private tabId: number | null = null;
   private streamId: string | null = null;
   private outputDeviceId: string | null = null;
+  private passthrough: boolean = true;
 
   protected getLogPrefix(): string {
     return '[TabAudioRecorder]';
   }
 
   protected shouldConnectToDestination(): boolean {
-    return true; // Tab audio needs passthrough (play back to user)
+    return this.passthrough;
   }
 
   /**
@@ -27,6 +28,12 @@ export class TabAudioRecorder extends ParticipantRecorder {
    */
   protected async onAudioContextCreated(options?: ParticipantAudioOptions): Promise<void> {
     this.outputDeviceId = options?.outputDeviceId || null;
+    this.passthrough = options?.passthrough ?? true;
+
+    if (!this.passthrough) {
+      console.info(`${this.getLogPrefix()} Tab audio passthrough disabled`);
+      return;
+    }
 
     // Set output device if specified (Chrome 110+ supports setSinkId)
     // Required for tab capture: Chrome stops original audio when tab is captured

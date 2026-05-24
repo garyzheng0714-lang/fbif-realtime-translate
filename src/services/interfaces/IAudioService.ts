@@ -232,8 +232,9 @@ export interface IAudioService {
    * Start recording from the current tab's audio
    * @param callback Function to receive audio data chunks
    * @param outputDeviceId Optional output device ID for audio passthrough
+   * @param passthrough Whether to route captured tab audio back to speakers
    */
-  startTabAudioRecording(callback: AudioRecordingCallback, outputDeviceId?: string): Promise<void>;
+  startTabAudioRecording(callback: AudioRecordingCallback, outputDeviceId?: string, passthrough?: boolean): Promise<void>;
 
   /**
    * Stop recording from tab audio
@@ -259,7 +260,7 @@ export interface IAudioService {
    * @param callback Function to receive audio data chunks
    * @param options Optional configuration (outputDeviceId for passthrough)
    */
-  startParticipantAudioRecording(callback: AudioRecordingCallback, options?: { outputDeviceId?: string }): Promise<void>;
+  startParticipantAudioRecording(callback: AudioRecordingCallback, options?: { outputDeviceId?: string; passthrough?: boolean }): Promise<void>;
 
   /**
    * Stop participant audio recording
