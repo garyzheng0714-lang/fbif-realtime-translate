@@ -8,6 +8,16 @@ function makeError(code, message) {
   return { ok: false, error: { code, message } };
 }
 
+function validateOriginalAudioMuteMessage(message) {
+  if (typeof message?.muted !== 'boolean') {
+    return makeError('caption_fetch_failed', 'YouTube original audio muted value must be a boolean.');
+  }
+  if (message.videoId !== undefined && typeof message.videoId !== 'string') {
+    return makeError('caption_fetch_failed', 'YouTube original audio videoId must be a string when provided.');
+  }
+  return null;
+}
+
 function readTrackName(track) {
   if (track?.name?.simpleText) return track.name.simpleText;
   if (Array.isArray(track?.name?.runs)) {
@@ -264,7 +274,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === ORIGINAL_AUDIO_MUTE_REQUEST_TYPE) {
-    sendResponse(setOriginalAudioMuted(Boolean(message.muted), message.videoId));
+    const validationError = validateOriginalAudioMuteMessage(message);
+    if (validationError) {
+      sendResponse(validationError);
+      return false;
+    }
+    sendResponse(setOriginalAudioMuted(message.muted, message.videoId));
     return false;
   }
 

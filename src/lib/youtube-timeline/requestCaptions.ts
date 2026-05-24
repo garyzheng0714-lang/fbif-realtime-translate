@@ -27,6 +27,25 @@ interface ChromeTabsWithMessages {
   sendMessage(tabId: number, message: unknown, callback?: (response: unknown) => void): Promise<unknown> | void;
 }
 
+type YouTubeTimelineCaptionMessage = {
+  type: typeof YOUTUBE_TIMELINE_CAPTION_REQUEST;
+};
+
+type YouTubeTimelineVideoTimeMessage = {
+  type: typeof YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST;
+};
+
+type YouTubeTimelineOriginalAudioMuteMessage = {
+  type: typeof YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST;
+  muted: boolean;
+  videoId?: string;
+};
+
+type YouTubeTimelineMessage =
+  | YouTubeTimelineCaptionMessage
+  | YouTubeTimelineVideoTimeMessage
+  | YouTubeTimelineOriginalAudioMuteMessage;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object';
 }
@@ -115,7 +134,7 @@ function queryActiveTab(chromeApi: Chrome, tabs: ChromeTabsWithMessages): Promis
   });
 }
 
-function sendTimelineRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, tabId: number, message: { type: string } & Record<string, unknown>): Promise<unknown> {
+function sendTimelineRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, tabId: number, message: YouTubeTimelineMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (fn: () => void) => {

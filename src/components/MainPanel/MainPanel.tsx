@@ -82,6 +82,10 @@ import {
   setYouTubeOriginalAudioMutedInTab,
   setYouTubeOriginalAudioMutedFromActiveTab,
 } from '../../lib/youtube-timeline/requestCaptions';
+import {
+  consumeTimelineOriginalAudioMutedState,
+  type TimelineOriginalAudioMutedState,
+} from '../../lib/youtube-timeline/originalAudioMuteState';
 import { getActiveCue, getCueWindow } from '../../lib/youtube-timeline/timelineScheduler';
 import { TimelineTts } from '../../lib/youtube-timeline/timelineTts';
 import { getTimelineCuesToTranslate, translateTimelineCueBatch, TranslationEngineTimelineTranslator } from '../../lib/youtube-timeline/timelineTranslate';
@@ -906,7 +910,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   const timelineSessionGenerationRef = useRef<number>(0);
   const timelineTranslationGenerationRef = useRef<number>(0);
   const timelineTickTimeoutRef = useRef<number | null>(null);
-  const timelineOriginalAudioMutedRef = useRef<{ tabId: number; videoId: string; previousMuted: boolean } | null>(null);
+  const timelineOriginalAudioMutedRef = useRef<TimelineOriginalAudioMutedState | null>(null);
 
   // Reference to track push-to-talk duration
   const pushToTalkStartTimeRef = useRef<number | null>(null);
@@ -1201,12 +1205,11 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   }, []);
 
   const restoreTimelineOriginalAudio = useCallback(async (reason: string) => {
-    const mutedState = timelineOriginalAudioMutedRef.current;
+    const mutedState = consumeTimelineOriginalAudioMutedState(timelineOriginalAudioMutedRef);
     if (!mutedState) return;
 
     try {
       await setYouTubeOriginalAudioMutedInTab(mutedState.tabId, mutedState.previousMuted, mutedState.videoId);
-      timelineOriginalAudioMutedRef.current = null;
     } catch (error) {
       console.warn(`[Sokuji] [MainPanel] Failed to restore YouTube original audio after ${reason}:`, error);
       addRealtimeEvent(
@@ -1235,6 +1238,21 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       throw new Error('YouTube original audio could not be muted for timeline mode');
     }
   }, []);
+
+  useEffect(() => {
+    const restoreOnTeardown = () => {
+      void restoreTimelineOriginalAudio('panel teardown');
+    };
+
+    window.addEventListener('pagehide', restoreOnTeardown);
+    window.addEventListener('beforeunload', restoreOnTeardown);
+
+    return () => {
+      window.removeEventListener('pagehide', restoreOnTeardown);
+      window.removeEventListener('beforeunload', restoreOnTeardown);
+      void restoreTimelineOriginalAudio('panel unmount');
+    };
+  }, [restoreTimelineOriginalAudio]);
 
   const startTimelineConversation = useCallback(async () => {
     const tickMs = 350;
