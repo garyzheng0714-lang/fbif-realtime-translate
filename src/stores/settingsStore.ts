@@ -29,12 +29,14 @@ import i18n, { changeLanguageWithLoad } from '../locales';
 
 // Conversation display mode — which half of a bilingual utterance to show
 export type DisplayMode = 'source' | 'translation' | 'both';
+export type TranslationMode = 'timeline' | 'streaming';
 
 // Common Settings
 export interface CommonSettings {
   provider: ProviderType;
   uiLanguage: string;
   uiMode: 'basic' | 'advanced';
+  translationMode: TranslationMode;
   systemInstructions: string;
   templateSystemInstructions: string;
   useTemplateMode: boolean;
@@ -186,6 +188,7 @@ const defaultCommonSettings: CommonSettings = {
   provider: Provider.OPENAI,
   uiLanguage: 'zh_CN',
   uiMode: 'basic',
+  translationMode: 'timeline',
   textOnly: false,
   systemInstructions:
     "# ROLE & OBJECTIVE\n" +
@@ -360,6 +363,7 @@ interface SettingsStore {
   provider: ProviderType;
   uiLanguage: string;
   uiMode: 'basic' | 'advanced';
+  translationMode: TranslationMode;
   systemInstructions: string;
   templateSystemInstructions: string;
   useTemplateMode: boolean;
@@ -411,6 +415,7 @@ interface SettingsStore {
   setProvider: (provider: ProviderType) => void;
   setUILanguage: (lang: string) => void;
   setUIMode: (mode: 'basic' | 'advanced') => void;
+  setTranslationMode: (mode: TranslationMode) => void;
   setTextOnly: (textOnly: boolean) => void;
   setSpeakerDisplayMode: (mode: DisplayMode) => Promise<void>;
   setParticipantDisplayMode: (mode: DisplayMode) => Promise<void>;
@@ -848,6 +853,12 @@ const useSettingsStore = create<SettingsStore>()(
       set({uiMode});
       const service = ServiceFactory.getSettingsService();
       await service.setSetting('settings.common.uiMode', uiMode);
+    },
+
+    setTranslationMode: async (translationMode) => {
+      set({translationMode});
+      const service = ServiceFactory.getSettingsService();
+      await service.setSetting('settings.common.translationMode', translationMode);
     },
 
     setSystemInstructions: async (systemInstructions) => {
@@ -1430,6 +1441,7 @@ const useSettingsStore = create<SettingsStore>()(
         }
         await changeLanguageWithLoad(uiLanguage);
         const uiMode = await service.getSetting('settings.common.uiMode', defaultCommonSettings.uiMode);
+        const translationMode = await service.getSetting<TranslationMode>('settings.common.translationMode', defaultCommonSettings.translationMode);
         const systemInstructions = await service.getSetting('settings.common.systemInstructions', defaultCommonSettings.systemInstructions);
         const templateSystemInstructions = await service.getSetting('settings.common.templateSystemInstructions', defaultCommonSettings.templateSystemInstructions);
         const useTemplateMode = await service.getSetting('settings.common.useTemplateMode', defaultCommonSettings.useTemplateMode);
@@ -1483,6 +1495,7 @@ const useSettingsStore = create<SettingsStore>()(
           provider: validProvider,
           uiLanguage,
           uiMode,
+          translationMode,
           systemInstructions,
           templateSystemInstructions,
           useTemplateMode,
@@ -1650,6 +1663,7 @@ const useSettingsStore = create<SettingsStore>()(
 export const useProvider = () => useSettingsStore((state) => state.provider);
 export const useUILanguage = () => useSettingsStore((state) => state.uiLanguage);
 export const useUIMode = () => useSettingsStore((state) => state.uiMode);
+export const useTranslationMode = () => useSettingsStore((state) => state.translationMode);
 export const useSpeakerDisplayMode = () => useSettingsStore((state) => state.speakerDisplayMode);
 export const useParticipantDisplayMode = () => useSettingsStore((state) => state.participantDisplayMode);
 export const useSubtitleModeActive = () => useSettingsStore((state) => state.subtitleModeActive);
@@ -1701,6 +1715,7 @@ export const useTextOnly = () => useSettingsStore((state) => state.textOnly);
 export const useSetProvider = () => useSettingsStore((state) => state.setProvider);
 export const useSetUILanguage = () => useSettingsStore((state) => state.setUILanguage);
 export const useSetUIMode = () => useSettingsStore((state) => state.setUIMode);
+export const useSetTranslationMode = () => useSettingsStore((state) => state.setTranslationMode);
 export const useSetTextOnly = () => useSettingsStore((state) => state.setTextOnly);
 export const useSetSpeakerDisplayMode = () => useSettingsStore((state) => state.setSpeakerDisplayMode);
 export const useSetParticipantDisplayMode = () => useSettingsStore((state) => state.setParticipantDisplayMode);

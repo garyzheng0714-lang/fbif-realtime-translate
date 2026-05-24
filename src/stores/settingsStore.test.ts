@@ -34,6 +34,7 @@ describe('settingsStore', () => {
     // Reset the store before each test
     useSettingsStore.setState({
       provider: Provider.OPENAI,
+      translationMode: 'timeline',
       isValidated: false,
       isValidating: false,
       validationError: null,
@@ -72,6 +73,23 @@ describe('settingsStore', () => {
 
       expect(useSettingsStore.getState().uiLanguage).toBe('zh_CN');
       expect(mockSetSetting).toHaveBeenCalledWith('settings.common.uiLanguage', 'zh_CN');
+    });
+  });
+
+  describe('Translation mode', () => {
+    it('defaults to timeline after loading settings so prerecorded YouTube uses the safer path first', async () => {
+      mockGetSetting.mockImplementation(async (_key: string, defaultValue: unknown) => defaultValue);
+
+      await useSettingsStore.getState().loadSettings();
+
+      expect(useSettingsStore.getState().translationMode).toBe('timeline');
+    });
+
+    it('persists streaming mode when the user switches back to live translation', async () => {
+      await useSettingsStore.getState().setTranslationMode('streaming');
+
+      expect(useSettingsStore.getState().translationMode).toBe('streaming');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.common.translationMode', 'streaming');
     });
   });
 
