@@ -54,6 +54,33 @@ describe('summarizeAst2Latency', () => {
     expect(summarizeAst2Latency(logs, 'participant').bottleneck).toBe('local_decode');
   });
 
+  it('uses streaming TTS decode events as the earliest user-facing dubbing readiness signal', () => {
+    const logs: LogEntry[] = [
+      {
+        timestamp: '10:00:02',
+        message: 'client: tts.streaming.decode.completed',
+        source: 'client',
+        eventType: 'tts.streaming.decode.completed',
+        clientId: 'participant',
+        events: [
+          { type: 'tts.streaming.decode.completed' as any, data: { latency: { sinceLastInputAudioMs: 980, decodeDurationMs: 12 } } },
+        ],
+      },
+      {
+        timestamp: '10:00:04',
+        message: 'client: tts.decode.completed',
+        source: 'client',
+        eventType: 'tts.decode.completed',
+        clientId: 'participant',
+        events: [
+          { type: 'tts.decode.completed' as any, data: { latency: { sinceLastInputAudioMs: 2100, decodeDurationMs: 26 } } },
+        ],
+      },
+    ];
+
+    expect(summarizeAst2Latency(logs, 'participant').latestDubReadyMs).toBe(980);
+  });
+
   it('returns no data when only the speaker client has latency logs', () => {
     const logs: LogEntry[] = [
       {

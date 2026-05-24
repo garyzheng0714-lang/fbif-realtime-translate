@@ -37,6 +37,11 @@ import {
 } from '../interfaces/IClient';
 import { Provider, ProviderType } from '../../types/Provider';
 import { isElectron, isExtension } from '../../utils/environment';
+import {
+  decodedOggOpusToInt16,
+  type StreamingOggOpusDecoder,
+  VolcengineAST2StreamingTTSDecoder,
+} from './VolcengineAST2StreamingTTSDecoder';
 // @ts-ignore - generated proto file
 import { data } from './volcengine-ast2/ast2-proto.js';
 
@@ -153,6 +158,7 @@ export class VolcengineAST2Client implements IClient {
   // concatenated per sentence before decoding
   private ttsChunks: Uint8Array[] = [];
   private decodeContext: AudioContext | null = null;
+  private streamingTTSDecoder: VolcengineAST2StreamingTTSDecoder | null = null;
 
   // Message matching reliability — track server-side Sequence and lock TTS to correct translation item
   private lastResponseSequence: number = -1;
@@ -604,15 +610,16 @@ export class VolcengineAST2Client implements IClient {
             // Lock the current translation item — TTS audio should associate with the
             // translation active when TTS starts, not when it ends
             this.ttsSentenceTargetItemId = this.currentTranslationItemId || this.lastCompletedTranslationItemId;
+            this.startStreamingTTSSentence();
           }
           break;
         case EventType.TTSSentenceEnd:
-          if (!this.currentConfig?.textOnly) this.decodeTTSAndPlay();
+          if (!this.currentConfig?.textOnly) this.finishStreamingOrDecodeTTSAndPlay();
           break;
         case EventType.TTSEnded:
           // Flush any remaining chunks
           if (!this.currentConfig?.textOnly && this.ttsChunks.length > 0) {
-            this.decodeTTSAndPlay();
+            this.finishStreamingOrDecodeTTSAndPlay();
           }
           break;
 
@@ -778,6 +785,7 @@ export class VolcengineAST2Client implements IClient {
     const chunk = new Uint8Array(response.data.length);
     chunk.set(response.data);
     this.ttsChunks.push(chunk);
+    this.streamingTTSDecoder?.decodeChunk(chunk).catch(() => {});
   }
 
   /**
@@ -805,91 +813,150 @@ export class VolcengineAST2Client implements IClient {
       }
 
       const audioBuffer = await this.decodeContext.decodeAudioData(opusData.buffer);
-      const float32 = audioBuffer.getChannelData(0);
-
-      // Convert Float32 [-1,1] → Int16 for the existing audio pipeline
-      const int16Array = new Int16Array(float32.length);
-      for (let i = 0; i < float32.length; i++) {
-        const s = Math.max(-1, Math.min(1, float32[i]));
-        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-      }
-
-      // Use the item ID locked at TTSSentenceStart, falling back to current state
-      const targetItemId = this.ttsSentenceTargetItemId || this.currentTranslationItemId || this.lastCompletedTranslationItemId;
-      this.ttsSentenceTargetItemId = null; // consumed — reset for next TTS sentence
-      const decodeCompletedAt = Date.now();
-      const decodeDurationMs = decodeCompletedAt - decodeStartedAt;
-      const existingItem = targetItemId
-        ? this.conversationItems.find(i => i.id === targetItemId)
-        : null;
-
-      this.eventHandlers.onRealtimeEvent?.({
-        source: 'client',
-        event: {
-          type: 'tts.decode.completed',
-          data: {
-            opusBytes: totalLength,
-            audioSamples: int16Array.length,
-            latency: {
-              ...buildVolcengineAST2LatencySnapshot(
-                {
-                  sessionStartedAt: this.sessionStartedAt,
-                  lastInputAudioSentAt: this.lastInputAudioSentAt,
-                  ttsSentenceStartedAt: this.ttsSentenceStartedAt,
-                  firstTtsChunkReceivedAt: this.firstTtsChunkReceivedAt,
-                },
-                decodeCompletedAt
-              ),
-              decodeDurationMs,
-            },
-          },
-        },
+      const int16Array = decodedOggOpusToInt16({
+        channelData: [audioBuffer.getChannelData(0)],
+        samplesDecoded: audioBuffer.length,
+        sampleRate: audioBuffer.sampleRate,
       });
 
-      if (existingItem) {
-        // Concatenate audio if the item already has some (multiple TTS sentences)
-        if (existingItem.formatted?.audio && existingItem.formatted.audio instanceof Int16Array) {
-          const prev = existingItem.formatted.audio;
-          const combined = new Int16Array(prev.length + int16Array.length);
-          combined.set(prev);
-          combined.set(int16Array, prev.length);
-          existingItem.formatted.audio = combined;
-        } else {
-          if (!existingItem.formatted) existingItem.formatted = {};
-          existingItem.formatted.audio = int16Array;
-        }
-
-        // Emit delta with audio for real-time playback
-        this.eventHandlers.onConversationUpdated?.({
-          item: existingItem,
-          delta: { audio: int16Array }
-        });
-
-        // Emit again without delta to trigger UI update (WAV creation + play button)
-        this.eventHandlers.onConversationUpdated?.({
-          item: existingItem,
-        });
-      } else {
-        // Fallback: no matching translation item — create standalone completed audio item
-        const item: ConversationItem = {
-          id: this.generateItemId('tts_audio'),
-          role: 'assistant',
-          type: 'message',
-          status: 'completed',
-          createdAt: Date.now(),
-          formatted: { audio: int16Array },
-          content: [{ type: 'audio' }]
-        };
-        this.conversationItems.push(item);
-
-        this.eventHandlers.onConversationUpdated?.({
-          item,
-          delta: { audio: int16Array }
-        });
-      }
+      const decodeCompletedAt = Date.now();
+      this.emitDecodedTTSAudio({
+        audio: int16Array,
+        eventType: 'tts.decode.completed',
+        opusBytes: totalLength,
+        decodeStartedAt,
+        decodeCompletedAt,
+        consumeTargetItem: true,
+      });
     } catch (error) {
       console.error('[VolcengineAST2Client] Failed to decode TTS Opus audio:', error);
     }
+  }
+
+  private startStreamingTTSSentence(): void {
+    this.getStreamingTTSDecoder().startSentence().catch(() => {});
+  }
+
+  private async finishStreamingOrDecodeTTSAndPlay(): Promise<void> {
+    const streamingDecoder = this.streamingTTSDecoder;
+    if (streamingDecoder?.isAvailable()) {
+      await streamingDecoder.finishSentence();
+      if (streamingDecoder.hasEmittedAudio()) {
+        this.ttsChunks = [];
+        this.ttsSentenceTargetItemId = null;
+        return;
+      }
+    }
+    await this.decodeTTSAndPlay();
+  }
+
+  private getStreamingTTSDecoder(): VolcengineAST2StreamingTTSDecoder {
+    if (!this.streamingTTSDecoder) {
+      this.streamingTTSDecoder = new VolcengineAST2StreamingTTSDecoder(
+        async () => {
+          const { OggOpusDecoder } = await import('ogg-opus-decoder');
+          return new OggOpusDecoder({
+            sampleRate: OUTPUT_SAMPLE_RATE,
+            speechQualityEnhancement: 'none',
+          } as any) as StreamingOggOpusDecoder;
+        },
+        (audio, meta) => {
+          this.emitDecodedTTSAudio({
+            audio,
+            eventType: 'tts.streaming.decode.completed',
+            opusBytes: meta.sourceBytes,
+            decodeStartedAt: meta.decodeStartedAt,
+            decodeCompletedAt: meta.decodeCompletedAt,
+            consumeTargetItem: false,
+          });
+        }
+      );
+    }
+    return this.streamingTTSDecoder;
+  }
+
+  private emitDecodedTTSAudio({
+    audio,
+    eventType,
+    opusBytes,
+    decodeStartedAt,
+    decodeCompletedAt,
+    consumeTargetItem,
+  }: {
+    audio: Int16Array;
+    eventType: 'tts.decode.completed' | 'tts.streaming.decode.completed';
+    opusBytes: number;
+    decodeStartedAt: number;
+    decodeCompletedAt: number;
+    consumeTargetItem: boolean;
+  }): void {
+    const targetItemId = this.ttsSentenceTargetItemId || this.currentTranslationItemId || this.lastCompletedTranslationItemId;
+    if (consumeTargetItem) this.ttsSentenceTargetItemId = null;
+    const existingItem = targetItemId
+      ? this.conversationItems.find(i => i.id === targetItemId)
+      : null;
+
+    this.eventHandlers.onRealtimeEvent?.({
+      source: 'client',
+      event: {
+        type: eventType,
+        data: {
+          opusBytes,
+          audioSamples: audio.length,
+          latency: {
+            ...buildVolcengineAST2LatencySnapshot(
+              {
+                sessionStartedAt: this.sessionStartedAt,
+                lastInputAudioSentAt: this.lastInputAudioSentAt,
+                ttsSentenceStartedAt: this.ttsSentenceStartedAt,
+                firstTtsChunkReceivedAt: this.firstTtsChunkReceivedAt,
+              },
+              decodeCompletedAt
+            ),
+            decodeDurationMs: decodeCompletedAt - decodeStartedAt,
+          },
+        },
+      },
+    });
+
+    if (existingItem) {
+      if (existingItem.formatted?.audio && existingItem.formatted.audio instanceof Int16Array) {
+        const prev = existingItem.formatted.audio;
+        const combined = new Int16Array(prev.length + audio.length);
+        combined.set(prev);
+        combined.set(audio, prev.length);
+        existingItem.formatted.audio = combined;
+      } else {
+        if (!existingItem.formatted) existingItem.formatted = {};
+        existingItem.formatted.audio = audio;
+      }
+
+      this.eventHandlers.onConversationUpdated?.({
+        item: existingItem,
+        delta: { audio }
+      });
+
+      this.eventHandlers.onConversationUpdated?.({
+        item: existingItem,
+      });
+      return;
+    }
+
+    const item: ConversationItem = {
+      id: this.generateItemId('tts_audio'),
+      role: 'assistant',
+      type: 'message',
+      status: 'completed',
+      createdAt: Date.now(),
+      formatted: { audio },
+      content: [{ type: 'audio' }]
+    };
+    this.conversationItems.push(item);
+
+    this.eventHandlers.onConversationUpdated?.({
+      item,
+      delta: { audio }
+    });
   }
 
   async disconnect(): Promise<void> {
@@ -931,6 +998,8 @@ export class VolcengineAST2Client implements IClient {
       try { this.decodeContext.close(); } catch (e) { /* ignore */ }
       this.decodeContext = null;
     }
+    this.streamingTTSDecoder?.dispose().catch(() => {});
+    this.streamingTTSDecoder = null;
 
     this.eventHandlers.onRealtimeEvent?.({
       source: 'client',
@@ -969,6 +1038,8 @@ export class VolcengineAST2Client implements IClient {
     this.lastInputAudioSentAt = 0;
     this.ttsSentenceStartedAt = 0;
     this.firstTtsChunkReceivedAt = 0;
+    this.streamingTTSDecoder?.dispose().catch(() => {});
+    this.streamingTTSDecoder = null;
   }
 
   appendInputAudio(audioData: Int16Array): void {

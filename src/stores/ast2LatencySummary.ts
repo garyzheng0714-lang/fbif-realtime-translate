@@ -32,6 +32,7 @@ export function summarizeAst2Latency(
   clientId: ClientId = 'participant'
 ): Ast2LatencySummary {
   const summary: Ast2LatencySummary = { ...emptySummary };
+  let hasStreamingDubReady = false;
 
   for (const log of logs) {
     if (log.clientId !== clientId || !log.events) continue;
@@ -46,7 +47,11 @@ export function summarizeAst2Latency(
         summary.latestTranslationReadyMs = latestNumber(summary.latestTranslationReadyMs, latency.sinceLastInputAudioMs);
       } else if (event.type === 'TTSResponse') {
         summary.latestFirstTtsChunkMs = latestNumber(summary.latestFirstTtsChunkMs, latency.sinceTtsSentenceStartMs);
-      } else if (event.type === 'tts.decode.completed') {
+      } else if (event.type === 'tts.streaming.decode.completed') {
+        hasStreamingDubReady = true;
+        summary.latestDubReadyMs = latestNumber(summary.latestDubReadyMs, latency.sinceLastInputAudioMs);
+        summary.latestDecodeMs = latestNumber(summary.latestDecodeMs, latency.decodeDurationMs);
+      } else if (event.type === 'tts.decode.completed' && !hasStreamingDubReady) {
         summary.latestDubReadyMs = latestNumber(summary.latestDubReadyMs, latency.sinceLastInputAudioMs);
         summary.latestDecodeMs = latestNumber(summary.latestDecodeMs, latency.decodeDurationMs);
       }

@@ -12,6 +12,11 @@ const {
   buildVolcengineAST2AuthHeaders,
 } = await import('./VolcengineAST2Client');
 
+const {
+  decodedOggOpusToInt16,
+  VolcengineAST2StreamingTTSDecoder,
+} = await import('./VolcengineAST2StreamingTTSDecoder');
+
 const baseConfig = {
   provider: 'volcengine_ast2' as const,
   model: 'ast-v2-s2s',
@@ -137,5 +142,62 @@ describe('buildVolcengineAST2LatencySnapshot', () => {
     expect(buildVolcengineAST2LatencySnapshot({}, 4000, {})).toEqual({
       receivedAt: 4000,
     });
+  });
+});
+
+describe('decodedOggOpusToInt16', () => {
+  it('converts decoded PCM samples into the Int16 format used by the audio pipeline', () => {
+    expect(Array.from(decodedOggOpusToInt16({
+      channelData: [new Float32Array([-1.5, -1, -0.5, 0, 0.5, 1, 1.5])],
+      samplesDecoded: 7,
+    }))).toEqual([-32768, -32768, -16384, 0, 16383, 32767, 32767]);
+  });
+
+  it('returns an empty audio delta when the streaming decoder has not produced PCM yet', () => {
+    expect(decodedOggOpusToInt16({ channelData: [], samplesDecoded: 0 })).toHaveLength(0);
+  });
+});
+
+describe('VolcengineAST2StreamingTTSDecoder', () => {
+  it('emits playable audio immediately when a streaming Ogg Opus chunk decodes before sentence end', async () => {
+    const emitted: Int16Array[] = [];
+    const decoder = new VolcengineAST2StreamingTTSDecoder(async () => ({
+      ready: Promise.resolve(),
+      decode: async () => ({
+        channelData: [new Float32Array([0, 0.5])],
+        samplesDecoded: 2,
+      }),
+      flush: async () => ({ channelData: [], samplesDecoded: 0 }),
+      reset: async () => {},
+      free: () => {},
+    }), (audio) => emitted.push(audio));
+
+    await decoder.startSentence();
+    const chunkDecoded = await decoder.decodeChunk(new Uint8Array([1, 2, 3]));
+
+    expect(chunkDecoded).toBe(true);
+    expect(emitted.map((audio) => Array.from(audio))).toEqual([[0, 16383]]);
+    expect(decoder.hasEmittedAudio()).toBe(true);
+  });
+
+  it('disables streaming for the sentence when decode fails so the caller can use whole-sentence fallback', async () => {
+    const emitted: Int16Array[] = [];
+    const decoder = new VolcengineAST2StreamingTTSDecoder(async () => ({
+      ready: Promise.resolve(),
+      decode: async () => {
+        throw new Error('bad ogg page');
+      },
+      flush: async () => ({ channelData: [], samplesDecoded: 0 }),
+      reset: async () => {},
+      free: () => {},
+    }), (audio) => emitted.push(audio));
+
+    await decoder.startSentence();
+    const chunkDecoded = await decoder.decodeChunk(new Uint8Array([1, 2, 3]));
+
+    expect(chunkDecoded).toBe(false);
+    expect(emitted).toEqual([]);
+    expect(decoder.isAvailable()).toBe(false);
+    expect(decoder.hasEmittedAudio()).toBe(false);
   });
 });
