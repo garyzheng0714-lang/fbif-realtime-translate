@@ -119,6 +119,10 @@
     "volcengineAST2CustomVocabularyFooter": "填入无效或留空的词表 ID 会被静默忽略——会话将视为该字段未设置。在火山引擎控制台中更新词表后，可能需要几分钟才能生效。",
     "geminiParticipantTokenWarning": "Gemini参与者模式会生成音频响应但只使用文本转录，导致额外的token消耗。",
     "help": "帮助",
+    "helpEmailSupport": "邮件支持",
+    "helpEmailTooltip": "报告问题或获取帮助",
+    "helpDiscussions": "讨论区",
+    "helpDiscussionsTooltip": "功能请求、反馈和社区讨论",
     "auto": "自动",
     "low": "低",
     "medium": "中",
@@ -187,6 +191,8 @@
     "ttsSettings": "语音合成（TTS）设置",
     "ttsSpeakerId": "说话人 ID",
     "ttsSpeed": "语速",
+    "edgeTtsVoice": "语音",
+    "loadingVoices": "正在加载语音...",
     "vadSettings": "VAD 设置",
     "vadSettingsTooltip": "语音活动检测配置。调整这些设置以优化您环境中的语音检测。",
     "vadThresholdTooltip": "语音检测灵敏度。值越高，需要越响亮/清晰的语音才能触发识别。值越低，对较轻的语音越敏感。",
@@ -316,7 +322,11 @@
     "audioSettings": "音频设置",
     "audioSettingsDesc": "在音频面板中配置您的麦克风和扬声器",
     "autoAuthenticated": "已通过您的账户自动认证",
-    "provider": "AI服务提供商"
+    "provider": "AI服务提供商",
+    "fetchingApiKey": "正在从您的账户获取 API 密钥...",
+    "apiKeyManagedByBackend": "后端托管的 API 密钥",
+    "autoManaged": "自动托管",
+    "kizunaApiKeyInfo": "此 API 密钥由我们的后端服务自动管理。"
   },
   "simpleConfig": {
     "interfaceLanguage": "界面语言",
@@ -429,7 +439,14 @@
     "local_inference": {
       "name": "免费",
       "description": "免费语音识别（ASR）+ 翻译 + 语音合成（TTS）",
-      "noKeyRequired": "无需 API 密钥"
+      "noKeyRequired": "无需 API 密钥",
+      "modelAsr": "语音识别",
+      "modelTranslation": "机器翻译",
+      "modelTts": "语音合成",
+      "participant": "参与者",
+      "fallback": "自动选择",
+      "noAsrModel": "没有可用模型",
+      "noTranslationModel": "没有模型，仅转写"
     },
     "openai_translate": {
       "name": "OpenAI Translate",
@@ -527,6 +544,13 @@
     "walletFrozen": "钱包已冻结。请联系客服。",
     "localModelsRequired": "请先在设置中下载所需的模型才能开始使用。",
     "clearConversation": "清除对话",
+    "switchToAdvanced": "切换到高级模式",
+    "switchToBasic": "切换到基础模式",
+    "decreaseFontSize": "减小字号",
+    "increaseFontSize": "增大字号",
+    "compactView": "紧凑视图",
+    "displaySettings": "显示设置",
+    "expandedView": "展开视图",
     "displayMode": {
       "speaker": "讲者",
       "participant": "参与者",
@@ -840,7 +864,16 @@
     "linuxMigrateBody": "AppImage 格式支持自动更新。选择一种格式下载 v{{version}}。"
   },
   "connectionStatus": {
+    "disconnected": "未连接",
+    "connecting": "连接中...",
+    "connected": "已连接",
+    "error": "连接错误",
+    "noApiKey": "需要 API 密钥",
+    "noMic": "需要麦克风",
     "reconnecting": "重新连接中..."
+  },
+  "logs": {
+    "webrtcFallback": "WebRTC 连接失败，已改用 WebSocket"
   },
   "subtitle": {
     "sessionEnded": "会话已结束",
@@ -871,6 +904,7 @@
       "bgColor": "背景颜色",
       "sourceColor": "原文颜色",
       "translationColor": "译文颜色",
+      "customColor": "自定义颜色",
       "newItemHighlight": "高亮显示新到达的文本"
     },
     "pttHint": "按住空格说话"

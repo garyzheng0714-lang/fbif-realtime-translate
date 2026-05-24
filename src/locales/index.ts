@@ -4,10 +4,14 @@ import LanguageDetector from 'i18next-browser-languagedetector';
 
 // Only import English as the fallback language (always needed)
 import enTranslation from './en/translation.json';
+import zhCNTranslation from './zh_CN/translation.json';
+
+const FBIF_DEFAULT_UI_LANGUAGE = 'zh_CN';
 
 // Cache for loaded translations
 const translationCache: Record<string, any> = {
   en: enTranslation,
+  zh_CN: zhCNTranslation,
 };
 
 // Lazy loaders for all other languages
@@ -47,6 +51,9 @@ const translationLoaders: Record<string, () => Promise<any>> = {
 const resources = {
   en: {
     translation: enTranslation,
+  },
+  zh_CN: {
+    translation: zhCNTranslation,
   },
 };
 
@@ -102,7 +109,8 @@ i18n
   .use(initReactI18next)
   .init({
     resources,
-    fallbackLng: 'en',
+    lng: FBIF_DEFAULT_UI_LANGUAGE,
+    fallbackLng: FBIF_DEFAULT_UI_LANGUAGE,
     debug: false, // Disable debug mode to reduce startup overhead
     
     interpolation: {
