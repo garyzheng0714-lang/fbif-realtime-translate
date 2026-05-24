@@ -46,6 +46,43 @@ describe('settingsStore', () => {
     vi.clearAllTimers();
   });
 
+  describe('UI Language', () => {
+    it('migrates the upstream English default to Simplified Chinese for the FBIF fork', async () => {
+      mockGetSetting.mockImplementation(async (key: string, defaultValue: unknown) => {
+        if (key === 'settings.common.uiLanguage') return 'en';
+        if (key === 'settings.fbif.uiLanguageMigratedToZhCN') return false;
+        return defaultValue;
+      });
+
+      await useSettingsStore.getState().loadSettings();
+
+      expect(useSettingsStore.getState().uiLanguage).toBe('zh_CN');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.common.uiLanguage', 'zh_CN');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.fbif.uiLanguageMigratedToZhCN', true);
+    });
+  });
+
+  describe('FBIF language defaults', () => {
+    it('migrates the upstream Volcengine AST2 zh-to-en default to English-to-Chinese', async () => {
+      mockGetSetting.mockImplementation(async (key: string, defaultValue: unknown) => {
+        if (key === 'settings.common.uiLanguage') return 'zh_CN';
+        if (key === 'settings.fbif.uiLanguageMigratedToZhCN') return true;
+        if (key === 'settings.volcengineAST2.sourceLanguage') return 'zh';
+        if (key === 'settings.volcengineAST2.targetLanguage') return 'en';
+        if (key === 'settings.fbif.volcengineAST2LanguageMigratedToEnZh') return false;
+        return defaultValue;
+      });
+
+      await useSettingsStore.getState().loadSettings();
+
+      expect(useSettingsStore.getState().volcengineAST2.sourceLanguage).toBe('en');
+      expect(useSettingsStore.getState().volcengineAST2.targetLanguage).toBe('zh');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.volcengineAST2.sourceLanguage', 'en');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.volcengineAST2.targetLanguage', 'zh');
+      expect(mockSetSetting).toHaveBeenCalledWith('settings.fbif.volcengineAST2LanguageMigratedToEnZh', true);
+    });
+  });
+
   describe('Provider Switching', () => {
     it('should set provider and clear cache without calling validateApiKey', async () => {
       // setProvider no longer calls validateApiKey directly —

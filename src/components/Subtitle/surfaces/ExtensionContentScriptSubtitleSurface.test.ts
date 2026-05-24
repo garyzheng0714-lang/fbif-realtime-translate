@@ -24,7 +24,7 @@ describe('ExtensionContentScriptSubtitleSurface', () => {
     sendMessage = vi.fn(async () => undefined);
     globalThis.chrome = {
       tabs: {
-        query: vi.fn(async () => [{ id: 7, url: 'https://meet.google.com/abc' }]),
+        query: vi.fn(async () => [{ id: 7, url: 'https://www.youtube.com/watch?v=test' }]),
         sendMessage,
         onRemoved: { addListener: (fn: Function) => listeners.onRemoved.push(fn), removeListener: vi.fn() },
         onUpdated: { addListener: (fn: Function) => listeners.onUpdated.push(fn), removeListener: vi.fn() },
@@ -137,6 +137,52 @@ describe('ExtensionContentScriptSubtitleSurface', () => {
       (call: any[]) => call[0]?.type === 'items',
     );
     expect(itemsMessages.length).toBe(1);
+  });
+
+  it('strips audio payloads before forwarding subtitle items over the Chrome port', async () => {
+    const { default: useSessionStore } = await import('../../../stores/sessionStore');
+    useSessionStore.setState({
+      items: [
+        {
+          id: 'text-with-audio',
+          formatted: {
+            text: 'hello',
+            audio: new Int16Array([1, 2, 3]),
+            audioSegments: [{ audio: new Int16Array([4, 5, 6]) }],
+          },
+          content: [{ type: 'text', text: 'hello' }, { type: 'audio', audio: new Int16Array([7, 8]) }],
+        },
+        {
+          id: 'audio-only',
+          formatted: { audio: new Int16Array([9]) },
+          content: [{ type: 'audio', audio: new Int16Array([10]) }],
+        },
+      ],
+      systemAudioItems: [],
+    } as any);
+
+    const surface = new ExtensionContentScriptSubtitleSurface();
+    await surface.enter();
+    const port = {
+      name: 'sokuji-subtitle',
+      onMessage: { addListener: vi.fn() },
+      onDisconnect: { addListener: vi.fn() },
+      postMessage: vi.fn(),
+      disconnect: vi.fn(),
+    };
+    listeners.onConnect[0](port);
+    await new Promise((r) => setTimeout(r, 0));
+
+    const init = port.postMessage.mock.calls.find(
+      (call: any[]) => call[0]?.type === 'state-init',
+    );
+    expect(init![0].payload.items).toEqual([
+      {
+        id: 'text-with-audio',
+        formatted: { text: 'hello' },
+        content: [{ type: 'text', text: 'hello' }],
+      },
+    ]);
   });
 
   describe('playback forwarding', () => {

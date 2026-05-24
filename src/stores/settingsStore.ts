@@ -23,7 +23,7 @@ import { getSubtitleSurface } from '../components/Subtitle/surfaces';
 import {ApiKeyValidationResult} from '../services/interfaces/ISettingsService';
 import {Provider, ProviderType} from '../types/Provider';
 import {ClientOperations} from '../services/ClientOperations';
-import i18n from '../locales';
+import i18n, { changeLanguageWithLoad } from '../locales';
 
 // ==================== Type Definitions ====================
 
@@ -184,7 +184,7 @@ interface CacheEntry {
 
 const defaultCommonSettings: CommonSettings = {
   provider: Provider.OPENAI,
-  uiLanguage: 'en',
+  uiLanguage: 'zh_CN',
   uiMode: 'basic',
   textOnly: false,
   systemInstructions:
@@ -326,8 +326,8 @@ const defaultVolcengineSTSettings: VolcengineSTSettings = {
 const defaultVolcengineAST2Settings: VolcengineAST2Settings = {
   appId: '',
   accessToken: '',
-  sourceLanguage: 'zh',
-  targetLanguage: 'en',
+  sourceLanguage: 'en',
+  targetLanguage: 'zh',
   turnDetectionMode: 'Auto',
   hotWordTableId: '',
   replacementTableId: '',
@@ -1414,7 +1414,20 @@ const useSettingsStore = create<SettingsStore>()(
 
         // Load common settings
         const provider = await service.getSetting('settings.common.provider', defaultCommonSettings.provider);
-        const uiLanguage = await service.getSetting('settings.common.uiLanguage', defaultCommonSettings.uiLanguage);
+        let uiLanguage = await service.getSetting('settings.common.uiLanguage', defaultCommonSettings.uiLanguage);
+        const migratedToChineseUI = await service.getSetting('settings.fbif.uiLanguageMigratedToZhCN', false);
+        if (!migratedToChineseUI && uiLanguage === 'en') {
+          uiLanguage = 'zh_CN';
+          try {
+            await Promise.all([
+              service.setSetting('settings.common.uiLanguage', uiLanguage),
+              service.setSetting('settings.fbif.uiLanguageMigratedToZhCN', true),
+            ]);
+          } catch (error) {
+            console.warn('[SettingsStore] Failed to persist FBIF Chinese UI migration:', error);
+          }
+        }
+        await changeLanguageWithLoad(uiLanguage);
         const uiMode = await service.getSetting('settings.common.uiMode', defaultCommonSettings.uiMode);
         const systemInstructions = await service.getSetting('settings.common.systemInstructions', defaultCommonSettings.systemInstructions);
         const templateSystemInstructions = await service.getSetting('settings.common.templateSystemInstructions', defaultCommonSettings.templateSystemInstructions);
@@ -1448,6 +1461,21 @@ const useSettingsStore = create<SettingsStore>()(
           loadProviderSettings('settings.localInference', defaultLocalInferenceSettings),
           loadProviderSettings('settings.openaiTranslate', defaultOpenAITranslateSettings),
         ]);
+
+        const migratedAST2Language = await service.getSetting('settings.fbif.volcengineAST2LanguageMigratedToEnZh', false);
+        if (!migratedAST2Language && volcengineAST2.sourceLanguage === 'zh' && volcengineAST2.targetLanguage === 'en') {
+          volcengineAST2.sourceLanguage = 'en';
+          volcengineAST2.targetLanguage = 'zh';
+          try {
+            await Promise.all([
+              service.setSetting('settings.volcengineAST2.sourceLanguage', 'en'),
+              service.setSetting('settings.volcengineAST2.targetLanguage', 'zh'),
+              service.setSetting('settings.fbif.volcengineAST2LanguageMigratedToEnZh', true),
+            ]);
+          } catch (error) {
+            console.warn('[SettingsStore] Failed to persist FBIF AST2 language migration:', error);
+          }
+        }
 
         set({
           provider: validProvider,

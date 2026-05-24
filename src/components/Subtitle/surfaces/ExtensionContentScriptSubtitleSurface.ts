@@ -22,6 +22,41 @@ function isSupportedUrl(url: string | undefined): boolean {
  */
 export const CONTENT_SCRIPT_UNAVAILABLE = 'CONTENT_SCRIPT_UNAVAILABLE';
 
+export function sanitizeSubtitlePortItems(items: any[] = []): any[] {
+  return items
+    .map((item) => {
+      if (!item || typeof item !== 'object') return item;
+
+      const formatted = item.formatted && typeof item.formatted === 'object'
+        ? { ...item.formatted }
+        : item.formatted;
+      if (formatted && typeof formatted === 'object') {
+        delete formatted.audio;
+        delete formatted.audioSegments;
+      }
+
+      const content = Array.isArray(item.content)
+        ? item.content
+            .filter((part: any) => part?.type !== 'audio')
+            .map((part: any) => {
+              if (!part || typeof part !== 'object') return part;
+              const next = { ...part };
+              delete next.audio;
+              return next;
+            })
+        : item.content;
+
+      return { ...item, formatted, content };
+    })
+    .filter((item) => {
+      if (!item || typeof item !== 'object') return true;
+      const formatted = item.formatted ?? {};
+      const hasText = Boolean(formatted.text || formatted.transcript);
+      const hasContent = Array.isArray(item.content) && item.content.length > 0;
+      return hasText || hasContent;
+    });
+}
+
 export class ExtensionContentScriptSubtitleSurface implements SubtitleSurface {
   private targetTabId: number | null = null;
   private port: any = null;
@@ -171,8 +206,8 @@ export class ExtensionContentScriptSubtitleSurface implements SubtitleSurface {
     this.port.postMessage({
       type: 'state-init',
       payload: {
-        items: session.items,
-        systemAudioItems: session.systemAudioItems,
+        items: sanitizeSubtitlePortItems(session.items),
+        systemAudioItems: sanitizeSubtitlePortItems(session.systemAudioItems),
         isSessionActive: session.isSessionActive,
         sessionStartTime: session.sessionStartTime,
         provider: lastConfig.provider,
@@ -189,8 +224,8 @@ export class ExtensionContentScriptSubtitleSurface implements SubtitleSurface {
       (next) => {
         this.port?.postMessage({
           type: 'items',
-          items: next.items,
-          systemAudioItems: next.systemAudioItems,
+          items: sanitizeSubtitlePortItems(next.items),
+          systemAudioItems: sanitizeSubtitlePortItems(next.systemAudioItems),
         });
       },
       {
