@@ -34,6 +34,11 @@ describe('parseYouTubeJson3', () => {
     expect(result).toEqual([]);
   });
 
+  it('returns no cues for non-object payloads', () => {
+    expect(parseYouTubeJson3(null)).toEqual([]);
+    expect(parseYouTubeJson3('not-json')).toEqual([]);
+  });
+
   it('uses the next cue start as end when duration is missing', () => {
     const result = parseYouTubeJson3({
       events: [
@@ -68,5 +73,18 @@ describe('parseYouTubeJson3', () => {
     });
 
     expect(result[0].endMs).toBe(1000);
+  });
+
+  it('falls back from negative duration instead of creating inverted timelines', () => {
+    const result = parseYouTubeJson3({
+      events: [
+        { tStartMs: 1000, dDurationMs: -500, segs: [{ utf8: 'First' }] },
+        { tStartMs: 1500, dDurationMs: 300, segs: [{ utf8: '\n' }] },
+        { tStartMs: 2600, dDurationMs: 900, segs: [{ utf8: 'Second' }] },
+      ],
+    });
+
+    expect(result[0].endMs).toBe(2600);
+    expect(result[0].endMs).toBeGreaterThanOrEqual(result[0].startMs);
   });
 });
