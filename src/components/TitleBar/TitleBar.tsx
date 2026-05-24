@@ -3,6 +3,7 @@ import React, { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Minus, Square, X, Settings, Terminal } from 'lucide-react';
 import { isElectron, isMacOS } from '../../utils/environment';
+import { useUIMode } from '../../stores/settingsStore';
 import SubtitleEnterButton from '../Subtitle/SubtitleEnterButton';
 import './TitleBar.scss';
 
@@ -20,6 +21,7 @@ const TitleBar: React.FC<TitleBarProps> = ({
   onToggleLogs,
 }) => {
   const { t } = useTranslation();
+  const uiMode = useUIMode();
 
   const minimize = useCallback(() => {
     void window.electron?.invoke('window:minimize');
@@ -68,18 +70,20 @@ const TitleBar: React.FC<TitleBarProps> = ({
           <Settings size={14} />
           <span className="title-bar__action-label">{settingsLabel}</span>
         </button>
-        <button
-          type="button"
-          // Keep the legacy `logs-button` class for the same reason as
-          // settings-button above — preserves any selector consumers.
-          className={`title-bar__action logs-button ${showLogs ? 'is-active' : ''}`}
-          onClick={onToggleLogs}
-          title={logsLabel}
-          aria-label={logsLabel}
-        >
-          <Terminal size={14} />
-          <span className="title-bar__action-label">{logsLabel}</span>
-        </button>
+        {uiMode === 'advanced' && (
+          <button
+            type="button"
+            // Keep the legacy `logs-button` class for the same reason as
+            // settings-button above — preserves any selector consumers.
+            className={`title-bar__action logs-button ${showLogs ? 'is-active' : ''}`}
+            onClick={onToggleLogs}
+            title={logsLabel}
+            aria-label={logsLabel}
+          >
+            <Terminal size={14} />
+            <span className="title-bar__action-label">{logsLabel}</span>
+          </button>
+        )}
       </div>
       {showInAppWindowControls && (
         <div className="title-bar__buttons">

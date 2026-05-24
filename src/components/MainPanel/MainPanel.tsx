@@ -73,6 +73,7 @@ import {
 } from '@floating-ui/react';
 import DisplaySettingsPopover from '../Display/DisplaySettingsPopover';
 import { usePlaybackStore, usePlaybackHighlight } from '../../stores/playbackStore';
+import FbifSimplePanel from './FbifSimplePanel';
 
 
 /**
@@ -2867,6 +2868,71 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   // Active source/target languages for badge labels (provider-agnostic).
   const sourceLanguage = currentSettings.sourceLanguage ?? 'EN';
   const targetLanguage = currentSettings.targetLanguage ?? 'EN';
+  const latestSubtitle = useMemo(() => {
+    for (let i = filteredItems.length - 1; i >= 0; i -= 1) {
+      const text = filteredItems[i].formatted?.transcript || filteredItems[i].formatted?.text;
+      if (text) return text;
+    }
+    return '';
+  }, [filteredItems]);
+  const siteLabel = useMemo(() => {
+    const site = new URLSearchParams(window.location.search).get('site') || '';
+    if (/youtube\.com|youtu\.be/i.test(site)) return '已识别 YouTube';
+    if (/bilibili\.com/i.test(site)) return '已识别 B站';
+    return site ? `已识别 ${site}` : '等待当前页面';
+  }, []);
+
+  if (uiMode === 'basic') {
+    return (
+      <div
+        className="main-panel-wrapper fbif-simple-panel-wrapper"
+        style={{
+          '--conversation-bg-color': conversationBgColor,
+          '--conversation-source-color': conversationSourceTextColor,
+          '--conversation-translation-color': conversationTranslationTextColor,
+        } as React.CSSProperties}
+      >
+        <UpdateBanner />
+        <UpdateDialog />
+        <FbifSimplePanel
+          siteLabel={siteLabel}
+          isSessionActive={isSessionActive}
+          isInitializing={isInitializing}
+          isReconnecting={isReconnecting}
+          canStartSession={canStartSession}
+          sessionDuration={sessionDuration}
+          latestSubtitle={latestSubtitle}
+          initProgress={initProgress}
+          onStart={connectConversation}
+          onStop={disconnectConversation}
+          onOpenSettings={() => navigateToSettings('provider')}
+        />
+        <AudioFeedbackWarning
+          isVisible={showFeedbackWarning}
+          inputDeviceLabel={selectedInputDevice?.label}
+          outputDeviceLabel={selectedMonitorDevice?.label}
+          recommendedAction={
+            getSafeAudioConfiguration(
+              selectedInputDevice,
+              selectedMonitorDevice,
+              isRealVoicePassthroughEnabled
+            ).recommendedAction
+          }
+          feedbackRisk={
+            getSafeAudioConfiguration(
+              selectedInputDevice,
+              selectedMonitorDevice,
+              isRealVoicePassthroughEnabled
+            ).feedbackRisk
+          }
+          onDismiss={() => {
+            setShowFeedbackWarning(false);
+            setFeedbackWarningDismissed(true);
+          }}
+        />
+      </div>
+    );
+  }
 
   // (renderConversationItem has been extracted to ConversationBubble above the component.)
 

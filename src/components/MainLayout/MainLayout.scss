@@ -4,8 +4,8 @@
   min-height: 0; /* Allow shrinking for nested scrolling */
   width: 100%;
   flex: 1; /* Take up available space from parent */
-  background-color: #1e1e1e; /* opaque background so window body looks normal */
-  color: white;
+  background-color: #f6f7fb; /* opaque background so window body looks normal */
+  color: #172033;
   overflow: hidden; /* Prevent overflow from causing scrollbars on the body */
   
   /* For small screens, change to a vertical layout with panel taking full width */
