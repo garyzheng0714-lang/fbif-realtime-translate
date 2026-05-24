@@ -44,6 +44,11 @@
   },
   "content_scripts": [
     {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+      "js": ["youtube-timeline-captions.js"],
+      "run_at": "document_idle"
+    },
+    {
       "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*", "https://www.bilibili.com/*", "https://live.bilibili.com/*"],
       "js": ["subtitle-overlay-content.js"],
       "run_at": "document_idle"
