@@ -98,9 +98,10 @@
     iframeEl.allow = 'clipboard-read; clipboard-write';
     iframeEl.style.cssText = [
       'position: fixed',
-      'left: 50%',
-      'transform: translateX(-50%)',
+      'right: 24px',
       'bottom: 80px',
+      'left: auto',
+      'transform: none',
       `width: ${defaultW}px`,
       `height: ${defaultH}px`,
       'border: none',
