@@ -463,8 +463,20 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       // Tag item with source for display
       item.source = 'participant';
 
-      // Skip audio delta - participant client is text-only
+      // FBIF fork: 不再 skip audio delta. participant 现在出 TTS 配音给用户.
+      // 把 audio delta 转交给与 speaker 路径同一个 ModernAudioPlayer.
       if (delta?.audio) {
+        const audioService = audioServiceRef.current;
+        if (audioService) {
+          const shouldPlayAudio = item.role === 'assistant';
+          audioService.addAudioData(delta.audio, 'ai-assistant', shouldPlayAudio, {
+            itemId: item.id,
+            sequenceNumber: delta.sequenceNumber,
+            timestamp: delta.timestamp
+          });
+        }
+        // 顺手 dispatch 测试事件 (verify-tts-audio-delta.mjs 用来计数)
+        window.dispatchEvent(new CustomEvent('sokuji:participant-audio-delta'));
         return;
       }
 
@@ -505,7 +517,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     const baseConfig = createSessionConfig(swappedSystemInstructions);
     const config = {
       ...baseConfig,
-      textOnly: true,
+      textOnly: false, // FBIF fork: participant 必须出 TTS 配音给用户 (不是出字幕给对方)
       // Override turn detection to use semantic VAD for participant audio (OpenAI-compatible)
       turnDetection: {
         type: 'semantic_vad' as const,
