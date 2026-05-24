@@ -28,7 +28,8 @@ import {
   useSetSpeakerDisplayMode,
   useSetParticipantDisplayMode,
   useCurrentTurnDetectionMode,
-  useSubtitleModeActive
+  useSubtitleModeActive,
+  useTranslationMode
 } from '../../stores/settingsStore';
 import useSettingsStore, { createParticipantLocalInferenceConfig } from '../../stores/settingsStore';
 import {
@@ -74,6 +75,11 @@ import {
 import DisplaySettingsPopover from '../Display/DisplaySettingsPopover';
 import { usePlaybackStore, usePlaybackHighlight } from '../../stores/playbackStore';
 import FbifSimplePanel from './FbifSimplePanel';
+import useTimelineStore from '../../stores/timelineStore';
+import { requestCaptions, requestYouTubeVideoTimeFromActiveTab } from '../../lib/youtube-timeline/requestCaptions';
+import { getActiveCue, getCueWindow } from '../../lib/youtube-timeline/timelineScheduler';
+import { TimelineTts } from '../../lib/youtube-timeline/timelineTts';
+import type { TimelineCue } from '../../lib/youtube-timeline/types';
 
 
 /**
@@ -83,6 +89,11 @@ import FbifSimplePanel from './FbifSimplePanel';
  */
 function isPttLikeMode(mode: string): boolean {
   return mode === 'Push-to-Talk' || mode === 'Push-to-Translate' || mode === 'Disabled';
+}
+
+interface PreparedTimelineAudio {
+  cue: TimelineCue;
+  chunks: Int16Array[];
 }
 
 
@@ -263,6 +274,11 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   const getProcessedLocalPrompt = useGetProcessedLocalPrompt();
   const createSessionConfig = useCreateSessionConfig();
   const navigateToSettings = useNavigateToSettings();
+  const translationMode = useTranslationMode();
+  const setTimelineLoadingCaptions = useTimelineStore((state) => state.setLoadingCaptions);
+  const setTimelineCaptionsReady = useTimelineStore((state) => state.setCaptionsReady);
+  const setTimelinePlaying = useTimelineStore((state) => state.setPlaying);
+  const setTimelineError = useTimelineStore((state) => state.setError);
 
   // Get session state from context
   const {
@@ -869,6 +885,13 @@ const MainPanel: React.FC<MainPanelProps> = () => {
 
   // Reference to audio service for accessing ModernAudioPlayer
   const audioServiceRef = useRef<IAudioService | null>(null);
+  const timelineTtsRef = useRef<TimelineTts | null>(null);
+  const timelinePreparedAudioRef = useRef<Map<string, PreparedTimelineAudio>>(new Map());
+  const timelineGeneratingCueIdsRef = useRef<Set<string>>(new Set());
+  const timelineQueuedCueIdsRef = useRef<Set<string>>(new Set());
+  const timelineLastVideoTimeMsRef = useRef<number | null>(null);
+  const timelineStopRef = useRef<boolean>(false);
+  const timelineTickTimeoutRef = useRef<number | null>(null);
 
   // Reference to track push-to-talk duration
   const pushToTalkStartTimeRef = useRef<number | null>(null);
@@ -1143,6 +1166,178 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     setIsReconnecting
   ]); // addRealtimeEvent from Zustand is stable
 
+  const resetTimelineAudioRuntime = useCallback(() => {
+    if (timelineTickTimeoutRef.current !== null) {
+      window.clearTimeout(timelineTickTimeoutRef.current);
+      timelineTickTimeoutRef.current = null;
+    }
+    timelinePreparedAudioRef.current.clear();
+    timelineGeneratingCueIdsRef.current.clear();
+    timelineQueuedCueIdsRef.current.clear();
+    timelineLastVideoTimeMsRef.current = null;
+    timelineTtsRef.current?.dispose();
+    timelineTtsRef.current = null;
+    audioServiceRef.current?.clearStreamingTrack('video-timeline-assistant');
+  }, []);
+
+  const startTimelineConversation = useCallback(async () => {
+    const tickMs = 350;
+    const prebufferMs = 10_000;
+    const smallLeadMs = 150;
+    const seekThresholdMs = 2_000;
+    const timelineTrackId = 'video-timeline-assistant';
+
+    const failTimeline = (error: unknown) => {
+      const message = error instanceof Error ? error.message : 'Timeline session failed';
+      timelineStopRef.current = true;
+      setTimelineError(message);
+      addRealtimeEvent(
+        { type: 'session.init_error', data: { message, error: String(error) } },
+        'client', 'session.init_error'
+      );
+      setIsSessionActive(false);
+      resetTimelineAudioRuntime();
+    };
+
+    try {
+      timelineStopRef.current = false;
+      resetTimelineAudioRuntime();
+      setItems([]);
+      setSystemAudioItems([]);
+      setTimelineLoadingCaptions();
+
+      if (!audioServiceRef.current) {
+        audioServiceRef.current = ServiceFactory.getAudioService();
+        await audioServiceRef.current.initialize();
+      }
+
+      const response = await requestCaptions();
+      setTimelineCaptionsReady(response);
+      timelineTtsRef.current = new TimelineTts();
+      setIsSessionActive(true);
+
+    const prepareCueAudio = async (cue: TimelineCue) => {
+      if (
+        timelineStopRef.current ||
+        timelinePreparedAudioRef.current.has(cue.id) ||
+        timelineGeneratingCueIdsRef.current.has(cue.id) ||
+        timelineQueuedCueIdsRef.current.has(cue.id)
+      ) {
+        return;
+      }
+
+      timelineGeneratingCueIdsRef.current.add(cue.id);
+      const chunks: Int16Array[] = [];
+
+      try {
+        if (!timelineTtsRef.current) {
+          timelineTtsRef.current = new TimelineTts();
+        }
+        const tts = timelineTtsRef.current;
+        await tts.generateChinese(cue.translatedText ?? cue.sourceText, (chunk) => {
+          chunks.push(chunk.samples);
+        });
+
+        if (!timelineStopRef.current && chunks.length > 0) {
+          timelinePreparedAudioRef.current.set(cue.id, { cue, chunks });
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message === 'Timeline TTS disposed') {
+          return;
+        }
+        if (!timelineStopRef.current) {
+          throw error;
+        }
+      } finally {
+        timelineGeneratingCueIdsRef.current.delete(cue.id);
+      }
+    };
+
+    const resetAfterSeek = () => {
+      audioServiceRef.current?.clearStreamingTrack(timelineTrackId);
+      timelinePreparedAudioRef.current.clear();
+      timelineGeneratingCueIdsRef.current.clear();
+      timelineQueuedCueIdsRef.current.clear();
+      timelineTtsRef.current?.dispose();
+      timelineTtsRef.current = new TimelineTts();
+    };
+
+    const scheduleTick = (tick: () => Promise<void>) => {
+      if (timelineStopRef.current) return;
+      timelineTickTimeoutRef.current = window.setTimeout(() => {
+        tick().catch(failTimeline);
+      }, tickMs);
+    };
+
+    const tick = async (): Promise<void> => {
+      const videoTime = await requestYouTubeVideoTimeFromActiveTab();
+      if (timelineStopRef.current) return;
+
+      const currentTimeMs = videoTime.currentTimeMs;
+      const lastVideoTimeMs = timelineLastVideoTimeMsRef.current;
+      if (lastVideoTimeMs !== null && Math.abs(currentTimeMs - lastVideoTimeMs) > seekThresholdMs) {
+        resetAfterSeek();
+      }
+      timelineLastVideoTimeMsRef.current = currentTimeMs;
+
+      const activeCue = getActiveCue(response.cues, currentTimeMs);
+      setTimelinePlaying(activeCue?.id ?? null);
+
+      for (const [cueId, prepared] of timelinePreparedAudioRef.current) {
+        if (prepared.cue.endMs <= currentTimeMs) {
+          timelinePreparedAudioRef.current.delete(cueId);
+        }
+      }
+
+      const cueWindow = getCueWindow(response.cues, currentTimeMs, prebufferMs);
+      for (const cue of cueWindow) {
+        prepareCueAudio(cue).catch(failTimeline);
+      }
+
+      if (!videoTime.paused) {
+        for (const cue of cueWindow) {
+          if (
+            timelineQueuedCueIdsRef.current.has(cue.id) ||
+            cue.startMs > currentTimeMs + smallLeadMs ||
+            cue.endMs <= currentTimeMs
+          ) {
+            continue;
+          }
+
+          const prepared = timelinePreparedAudioRef.current.get(cue.id);
+          if (!prepared) continue;
+
+          timelineQueuedCueIdsRef.current.add(cue.id);
+          timelinePreparedAudioRef.current.delete(cue.id);
+          for (const chunk of prepared.chunks) {
+            audioServiceRef.current?.addAudioData(chunk, timelineTrackId, true, {
+              itemId: cue.id,
+              cueId: cue.id,
+              startMs: cue.startMs,
+              endMs: cue.endMs,
+              sourceText: cue.sourceText,
+            });
+          }
+        }
+      }
+
+      scheduleTick(tick);
+    };
+
+      await tick();
+    } catch (error) {
+      failTimeline(error);
+    }
+  }, [
+    addRealtimeEvent,
+    resetTimelineAudioRuntime,
+    setTimelineCaptionsReady,
+    setTimelineError,
+    setTimelineLoadingCaptions,
+    setTimelinePlaying,
+    setIsSessionActive,
+  ]);
+
   /**
    * Disconnect and reset conversation state
    */
@@ -1166,6 +1361,9 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       setIsAIResponding(false);
       setIsUsingWebRTC(false);
       pendingTextRef.current = null;
+      timelineStopRef.current = true;
+      resetTimelineAudioRuntime();
+      useTimelineStore.getState().resetTimeline();
 
       // Clear audio quality tracking interval
       if (audioQualityIntervalRef.current) {
@@ -1276,7 +1474,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     } finally {
       disconnectInProgressRef.current = false;
     }
-  }, [refetchAll, setIsReconnecting]);
+  }, [refetchAll, resetTimelineAudioRuntime, setIsReconnecting]);
 
   // Keep the ref in sync so client onClose handlers can call disconnectConversation
   // without creating a useCallback dep cycle. The ref is read inside async event
@@ -1293,6 +1491,11 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     try {
       setIsInitializing(true);
       setInitProgress(null);
+
+      if (translationMode === 'timeline') {
+        await startTimelineConversation();
+        return;
+      }
 
       // Re-validate before starting session to catch stale button state.
       // validateApiKey is the single authority for session readiness — it handles
@@ -1720,12 +1923,14 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     localInferenceSettings,
     noiseSuppressionMode,
     provider,
+    translationMode,
     transportType,
     isLoaded,
     isSignedIn,
     getToken,
     getCurrentProviderSettings,
     getSessionConfig,
+    startTimelineConversation,
     setupClientListeners,
     createAIClient,
     selectedInputDevice,

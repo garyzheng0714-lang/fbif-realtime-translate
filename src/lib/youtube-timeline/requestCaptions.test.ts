@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { requestCaptions, YOUTUBE_TIMELINE_CAPTION_REQUEST } from './requestCaptions';
+import {
+  requestCaptions,
+  requestYouTubeVideoTimeFromActiveTab,
+  YOUTUBE_TIMELINE_CAPTION_REQUEST,
+  YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST,
+} from './requestCaptions';
 
 const activeYouTubeTab = {
   id: 7,
@@ -94,6 +99,47 @@ describe('requestCaptions', () => {
     await expect(requestCaptions()).rejects.toMatchObject({
       code: 'no_caption_tracks',
       message: 'No caption tracks were found for this YouTube video.',
+    });
+  });
+
+  it('requests the active YouTube tab video time through the content script', async () => {
+    const { sendMessage } = installChromeMock({
+      ok: true,
+      payload: {
+        currentTimeMs: 12500,
+        durationMs: 60000,
+        paused: false,
+        videoId: 'video-123',
+      },
+    });
+
+    const result = await requestYouTubeVideoTimeFromActiveTab();
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      activeYouTubeTab.id,
+      { type: YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST },
+      expect.any(Function),
+    );
+    expect(result).toEqual({
+      currentTimeMs: 12500,
+      durationMs: 60000,
+      paused: false,
+      videoId: 'video-123',
+    });
+  });
+
+  it('preserves content script error codes when video time is unavailable', async () => {
+    installChromeMock({
+      ok: false,
+      error: {
+        code: 'no_video',
+        message: 'No video element was found.',
+      },
+    });
+
+    await expect(requestYouTubeVideoTimeFromActiveTab()).rejects.toMatchObject({
+      code: 'no_video',
+      message: 'No video element was found.',
     });
   });
 });

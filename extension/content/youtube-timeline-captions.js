@@ -1,6 +1,7 @@
 /* global chrome */
 
-const REQUEST_TYPE = 'fbif:youtube-timeline:get-captions';
+const CAPTION_REQUEST_TYPE = 'fbif:youtube-timeline:get-captions';
+const VIDEO_TIME_REQUEST_TYPE = 'fbif:youtube-timeline:get-video-time';
 
 function makeError(code, message) {
   return { ok: false, error: { code, message } };
@@ -211,8 +212,30 @@ async function getCaptions() {
   }
 }
 
+function getVideoTime() {
+  const video = document.querySelector('video');
+  if (!video) {
+    return makeError('no_video', 'No YouTube video element was found on this page.');
+  }
+
+  return {
+    ok: true,
+    payload: {
+      currentTimeMs: Math.max(0, Math.round(video.currentTime * 1000)),
+      durationMs: Number.isFinite(video.duration) ? Math.max(0, Math.round(video.duration * 1000)) : null,
+      paused: video.paused,
+      videoId: getCurrentUrlVideoId(),
+    },
+  };
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type !== REQUEST_TYPE) return undefined;
+  if (message?.type === VIDEO_TIME_REQUEST_TYPE) {
+    sendResponse(getVideoTime());
+    return false;
+  }
+
+  if (message?.type !== CAPTION_REQUEST_TYPE) return undefined;
 
   getCaptions()
     .then(sendResponse)

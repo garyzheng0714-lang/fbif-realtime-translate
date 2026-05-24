@@ -2,8 +2,16 @@ import { parseYouTubeJson3 } from './parseJson3';
 import type { TimelineError, YouTubeCaptionTrack, YouTubeTimelineResponse } from './types';
 
 export const YOUTUBE_TIMELINE_CAPTION_REQUEST = 'fbif:youtube-timeline:get-captions';
+export const YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST = 'fbif:youtube-timeline:get-video-time';
 
 type TimelineErrorCode = TimelineError['code'];
+
+export interface YouTubeVideoTimeResponse {
+  currentTimeMs: number;
+  durationMs: number | null;
+  paused: boolean;
+  videoId: string;
+}
 
 interface ChromeTabsWithMessages {
   query(queryInfo: { active: boolean; currentWindow: boolean }, callback: (tabs: ChromeTab[]) => void): void;
@@ -99,7 +107,7 @@ function queryActiveTab(chromeApi: Chrome, tabs: ChromeTabsWithMessages): Promis
   });
 }
 
-function sendCaptionRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, tabId: number): Promise<unknown> {
+function sendTimelineRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, tabId: number, type: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (fn: () => void) => {
@@ -111,7 +119,7 @@ function sendCaptionRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, tab
     try {
       const maybePromise = tabs.sendMessage(
         tabId,
-        { type: YOUTUBE_TIMELINE_CAPTION_REQUEST },
+        { type },
         (response) => {
           const runtimeError = chromeApi.runtime.lastError;
           if (runtimeError) {
@@ -191,7 +199,30 @@ function parseTimelineResponse(response: unknown, tab: ChromeTab, fallbackVideoI
   };
 }
 
-export async function requestCaptions(): Promise<YouTubeTimelineResponse> {
+function parseVideoTimeResponse(response: unknown): YouTubeVideoTimeResponse {
+  if (!isRecord(response)) {
+    throw createTimelineError('caption_fetch_failed', 'Content script returned an invalid video time response');
+  }
+
+  const responseError = getResponseError(response);
+  if (responseError) {
+    throw createTimelineError(responseError.code, responseError.message);
+  }
+
+  const payload = isRecord(response.payload) ? response.payload : response;
+  if (typeof payload.currentTimeMs !== 'number' || typeof payload.paused !== 'boolean' || typeof payload.videoId !== 'string') {
+    throw createTimelineError('caption_fetch_failed', 'Content script returned an incomplete video time response');
+  }
+
+  return {
+    currentTimeMs: payload.currentTimeMs,
+    durationMs: typeof payload.durationMs === 'number' ? payload.durationMs : null,
+    paused: payload.paused,
+    videoId: payload.videoId,
+  };
+}
+
+async function getActiveYouTubeTab(): Promise<{ chromeApi: Chrome; tabs: ChromeTabsWithMessages; tab: ChromeTab; videoId: string }> {
   const { chromeApi, tabs } = getChromeTabs();
   const [tab] = await queryActiveTab(chromeApi, tabs);
   if (!tab?.id) {
@@ -206,8 +237,14 @@ export async function requestCaptions(): Promise<YouTubeTimelineResponse> {
     throw createTimelineError('no_video', 'Active YouTube tab does not contain a video id');
   }
 
+  return { chromeApi, tabs, tab, videoId };
+}
+
+export async function requestCaptions(): Promise<YouTubeTimelineResponse> {
+  const { chromeApi, tabs, tab, videoId } = await getActiveYouTubeTab();
+
   try {
-    const response = await sendCaptionRequest(chromeApi, tabs, tab.id);
+    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, YOUTUBE_TIMELINE_CAPTION_REQUEST);
     return parseTimelineResponse(response, tab, videoId);
   } catch (error) {
     if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
@@ -217,6 +254,24 @@ export async function requestCaptions(): Promise<YouTubeTimelineResponse> {
       throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
     }
     const message = error instanceof Error ? error.message : 'Failed to request captions';
+    throw createTimelineError('caption_fetch_failed', message);
+  }
+}
+
+export async function requestYouTubeVideoTimeFromActiveTab(): Promise<YouTubeVideoTimeResponse> {
+  const { chromeApi, tabs, tab } = await getActiveYouTubeTab();
+
+  try {
+    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST);
+    return parseVideoTimeResponse(response);
+  } catch (error) {
+    if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
+      throw error;
+    }
+    if (isRecord(error) && isTimelineErrorCode(error.code)) {
+      throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
+    }
+    const message = error instanceof Error ? error.message : 'Failed to request YouTube video time';
     throw createTimelineError('caption_fetch_failed', message);
   }
 }
