@@ -45,4 +45,28 @@ describe('parseYouTubeJson3', () => {
     expect(result[0].endMs).toBe(2600);
     expect(result[1].endMs).toBe(3500);
   });
+
+  it('skips empty formatting events when finding the next cue boundary', () => {
+    const result = parseYouTubeJson3({
+      events: [
+        { tStartMs: 1000, segs: [{ utf8: 'First' }] },
+        { tStartMs: 1500, dDurationMs: 300, segs: [{ utf8: '\n' }] },
+        { tStartMs: 2600, dDurationMs: 900, segs: [{ utf8: 'Second' }] },
+      ],
+    });
+
+    expect(result[0].endMs).toBe(2600);
+    expect(result[1].startMs).toBe(2600);
+  });
+
+  it('uses a finite zero duration as the cue end', () => {
+    const result = parseYouTubeJson3({
+      events: [
+        { tStartMs: 1000, dDurationMs: 0, segs: [{ utf8: 'Instant' }] },
+        { tStartMs: 2600, dDurationMs: 900, segs: [{ utf8: 'Second' }] },
+      ],
+    });
+
+    expect(result[0].endMs).toBe(1000);
+  });
 });

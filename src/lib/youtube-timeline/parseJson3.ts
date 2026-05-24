@@ -18,6 +18,12 @@ function normalizeCaptionText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+function getCaptionText(event: Json3Event): string {
+  return normalizeCaptionText(
+    (event.segs || []).map((segment) => segment.utf8 || '').join(''),
+  );
+}
+
 export function parseYouTubeJson3(payload: Json3Payload): TimelineCue[] {
   const events = Array.isArray(payload.events) ? payload.events : [];
   const cues: TimelineCue[] = [];
@@ -26,19 +32,22 @@ export function parseYouTubeJson3(payload: Json3Payload): TimelineCue[] {
     const startMs = Number(event.tStartMs);
     if (!Number.isFinite(startMs)) return;
 
-    const text = normalizeCaptionText(
-      (event.segs || []).map((segment) => segment.utf8 || '').join(''),
-    );
+    const text = getCaptionText(event);
     if (!text) return;
 
-    const nextStartMs = events
-      .slice(index + 1)
-      .map((candidate) => Number(candidate.tStartMs))
-      .find((value) => Number.isFinite(value) && value > startMs);
-    const durationMs = Number(event.dDurationMs);
-    const endMs = Number.isFinite(durationMs) && durationMs > 0
+    const nextCue = events.slice(index + 1).find((candidate) => {
+      const candidateStartMs = Number(candidate.tStartMs);
+      return (
+        Number.isFinite(candidateStartMs) &&
+        candidateStartMs > startMs &&
+        Boolean(getCaptionText(candidate))
+      );
+    });
+    const nextStartMs = nextCue ? Number(nextCue.tStartMs) : undefined;
+    const durationMs = event.dDurationMs;
+    const endMs = typeof durationMs === 'number' && Number.isFinite(durationMs)
       ? startMs + durationMs
-      : nextStartMs || startMs + 2500;
+      : nextStartMs ?? startMs + 2500;
 
     cues.push({
       id: `yt-${startMs}-${endMs}-${cues.length}`,
