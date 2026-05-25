@@ -136,6 +136,23 @@ function findPlayerResponse(urlVideoId) {
   return { playerResponse: null, foundStaleResponse };
 }
 
+async function fetchFreshPlayerResponse(urlVideoId) {
+  const watchUrl = new URL('https://www.youtube.com/watch');
+  watchUrl.searchParams.set('v', urlVideoId);
+  watchUrl.searchParams.set('hl', 'en');
+  watchUrl.searchParams.set('persist_hl', '1');
+
+  const response = await fetch(watchUrl.toString(), {
+    credentials: 'include',
+  });
+  if (!response.ok) return null;
+
+  const html = await response.text();
+  const playerResponse = parsePlayerResponseFromScript(html);
+  if (getPlayerResponseVideoId(playerResponse) !== urlVideoId) return null;
+  return playerResponse;
+}
+
 function readCaptionTracks(playerResponse) {
   const captionTracks =
     playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
@@ -192,7 +209,8 @@ async function getCaptions() {
     return makeError('no_video', 'No YouTube video ID was found in the current page URL.');
   }
 
-  const { playerResponse, foundStaleResponse } = findPlayerResponse(urlVideoId);
+  const { playerResponse: pagePlayerResponse, foundStaleResponse } = findPlayerResponse(urlVideoId);
+  const playerResponse = pagePlayerResponse || await fetchFreshPlayerResponse(urlVideoId);
   if (!playerResponse) {
     if (foundStaleResponse) {
       return makeError('no_video', '当前 YouTube 页面状态尚未同步，请稍后重试。');
