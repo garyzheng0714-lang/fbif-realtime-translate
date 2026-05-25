@@ -90,6 +90,12 @@ describe('requestCaptions', () => {
     });
   });
 
+  it('uses v2 message types so stale listeners on already-open YouTube pages do not answer', () => {
+    expect(YOUTUBE_TIMELINE_CAPTION_REQUEST).toBe('fbif:youtube-timeline:v2:get-captions');
+    expect(YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST).toBe('fbif:youtube-timeline:v2:get-video-time');
+    expect(YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST).toBe('fbif:youtube-timeline:v2:set-original-audio-muted');
+  });
+
   it('preserves content script error codes from ok:false responses', async () => {
     installChromeMock({
       ok: false,

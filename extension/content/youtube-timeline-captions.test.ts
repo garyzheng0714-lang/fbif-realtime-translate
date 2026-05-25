@@ -54,7 +54,7 @@ describe('youtube timeline captions content script', () => {
     const contentScript = installContentScript(video);
 
     const response = contentScript.send({
-      type: 'fbif:youtube-timeline:set-original-audio-muted',
+      type: 'fbif:youtube-timeline:v2:set-original-audio-muted',
       muted: 'false',
       videoId: 'video-123',
     });
@@ -74,7 +74,7 @@ describe('youtube timeline captions content script', () => {
     const contentScript = installContentScript(video);
 
     const response = contentScript.send({
-      type: 'fbif:youtube-timeline:set-original-audio-muted',
+      type: 'fbif:youtube-timeline:v2:set-original-audio-muted',
       muted: true,
       videoId: 123,
     });
@@ -152,7 +152,7 @@ describe('youtube timeline captions content script', () => {
     vm.runInContext(fs.readFileSync(scriptPath, 'utf8'), context);
 
     const response = await new Promise<any>((resolve) => {
-      listener?.({ type: 'fbif:youtube-timeline:get-captions' }, {}, resolve);
+      listener?.({ type: 'fbif:youtube-timeline:v2:get-captions' }, {}, resolve);
     });
 
     expect(response).toMatchObject({
@@ -168,5 +168,51 @@ describe('youtube timeline captions content script', () => {
       'https://www.youtube.com/watch?v=video-123&hl=en&persist_hl=1',
       { credentials: 'include' },
     );
+  });
+
+  it('installs a v2 listener even when an already-open page has the stale v1 loaded flag', () => {
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void) | null = null;
+    const context = vm.createContext({
+      URL,
+      fetch,
+      console,
+      window: {
+        location: { href: 'https://www.youtube.com/watch?v=video-123' },
+        __fbifYoutubeTimelineCaptionsLoaded__: true,
+      },
+      document: {
+        scripts: [],
+        title: 'Video',
+        querySelector: vi.fn((selector: string) => (
+          selector === 'video'
+            ? { currentTime: 12.5, duration: 60, paused: false, muted: false }
+            : null
+        )),
+      },
+      chrome: {
+        runtime: {
+          onMessage: {
+            addListener: vi.fn((callback) => {
+              listener = callback;
+            }),
+          },
+        },
+      },
+    });
+    vm.runInContext(fs.readFileSync(scriptPath, 'utf8'), context);
+
+    const response = new Promise<any>((resolve) => {
+      listener?.({ type: 'fbif:youtube-timeline:v2:get-video-time' }, {}, resolve);
+    });
+
+    return expect(response).resolves.toMatchObject({
+      ok: true,
+      payload: {
+        currentTimeMs: 12500,
+        durationMs: 60000,
+        paused: false,
+        videoId: 'video-123',
+      },
+    });
   });
 });

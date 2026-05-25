@@ -1,9 +1,9 @@
 import { parseYouTubeJson3 } from './parseJson3';
 import type { TimelineError, YouTubeCaptionTrack, YouTubeTimelineResponse } from './types';
 
-export const YOUTUBE_TIMELINE_CAPTION_REQUEST = 'fbif:youtube-timeline:get-captions';
-export const YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST = 'fbif:youtube-timeline:get-video-time';
-export const YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST = 'fbif:youtube-timeline:set-original-audio-muted';
+export const YOUTUBE_TIMELINE_CAPTION_REQUEST = 'fbif:youtube-timeline:v2:get-captions';
+export const YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST = 'fbif:youtube-timeline:v2:get-video-time';
+export const YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST = 'fbif:youtube-timeline:v2:set-original-audio-muted';
 
 type TimelineErrorCode = TimelineError['code'];
 

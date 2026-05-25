@@ -1,12 +1,13 @@
 /* global chrome */
 
 (function () {
-if (window.__fbifYoutubeTimelineCaptionsLoaded__) return;
-window.__fbifYoutubeTimelineCaptionsLoaded__ = true;
+const CONTENT_SCRIPT_VERSION = 2;
+if (window.__fbifYoutubeTimelineCaptionsVersion__ === CONTENT_SCRIPT_VERSION) return;
+window.__fbifYoutubeTimelineCaptionsVersion__ = CONTENT_SCRIPT_VERSION;
 
-const CAPTION_REQUEST_TYPE = 'fbif:youtube-timeline:get-captions';
-const VIDEO_TIME_REQUEST_TYPE = 'fbif:youtube-timeline:get-video-time';
-const ORIGINAL_AUDIO_MUTE_REQUEST_TYPE = 'fbif:youtube-timeline:set-original-audio-muted';
+const CAPTION_REQUEST_TYPE = 'fbif:youtube-timeline:v2:get-captions';
+const VIDEO_TIME_REQUEST_TYPE = 'fbif:youtube-timeline:v2:get-video-time';
+const ORIGINAL_AUDIO_MUTE_REQUEST_TYPE = 'fbif:youtube-timeline:v2:set-original-audio-muted';
 
 function makeError(code, message) {
   return { ok: false, error: { code, message } };
