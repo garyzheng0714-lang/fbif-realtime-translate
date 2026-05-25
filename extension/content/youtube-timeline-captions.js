@@ -1,5 +1,9 @@
 /* global chrome */
 
+(function () {
+if (window.__fbifYoutubeTimelineCaptionsLoaded__) return;
+window.__fbifYoutubeTimelineCaptionsLoaded__ = true;
+
 const CAPTION_REQUEST_TYPE = 'fbif:youtube-timeline:get-captions';
 const VIDEO_TIME_REQUEST_TYPE = 'fbif:youtube-timeline:get-video-time';
 const ORIGINAL_AUDIO_MUTE_REQUEST_TYPE = 'fbif:youtube-timeline:set-original-audio-muted';
@@ -296,3 +300,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
+})();

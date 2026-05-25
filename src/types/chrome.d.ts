@@ -24,6 +24,12 @@ interface Chrome {
     query(queryInfo: { active?: boolean; currentWindow?: boolean }, callback: (tabs: ChromeTab[]) => void): void;
     query(queryInfo: { active?: boolean; currentWindow?: boolean }): Promise<ChromeTab[]>;
   };
+  scripting?: {
+    executeScript(
+      details: { target: { tabId: number }; files: string[] },
+      callback?: (results: unknown[]) => void,
+    ): Promise<unknown[]> | void;
+  };
   storage: {
     sync: {
       get(keys: string | string[] | object | null, callback: (items: any) => void): void;

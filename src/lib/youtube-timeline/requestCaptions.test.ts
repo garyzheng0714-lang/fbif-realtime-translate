@@ -105,6 +105,75 @@ describe('requestCaptions', () => {
     });
   });
 
+  it('injects the timeline content script and retries when an existing YouTube tab has no fresh receiver', async () => {
+    const successResponse = {
+      ok: true,
+      payload: {
+        videoId: 'video-123',
+        title: 'Real video title',
+        sourceLanguage: 'en',
+        tracks: [
+          {
+            baseUrl: 'https://example.test/timedtext',
+            languageCode: 'en',
+            name: 'English',
+            isTranslatable: true,
+          },
+        ],
+        json3: {
+          events: [
+            {
+              tStartMs: 1000,
+              dDurationMs: 1500,
+              segs: [{ utf8: 'Hello after injection' }],
+            },
+          ],
+        },
+      },
+    };
+    const query = vi.fn((_queryInfo, callback) => {
+      callback([activeYouTubeTab]);
+    });
+    const sendMessage = vi.fn((_tabId, _message, callback) => {
+      const chromeMock = (globalThis as any).chrome;
+      if (sendMessage.mock.calls.length === 1) {
+        chromeMock.runtime.lastError = { message: 'The message port closed before a response was received.' };
+        callback(undefined);
+        chromeMock.runtime.lastError = undefined;
+        return;
+      }
+      callback(successResponse);
+    });
+    const executeScript = vi.fn((_details, callback) => {
+      callback?.([{ frameId: 0 }]);
+    });
+
+    (globalThis as any).chrome = {
+      runtime: {
+        lastError: undefined,
+      },
+      tabs: {
+        query,
+        sendMessage,
+      },
+      scripting: {
+        executeScript,
+      },
+    };
+
+    const result = await requestCaptions();
+
+    expect(executeScript).toHaveBeenCalledWith(
+      {
+        target: { tabId: activeYouTubeTab.id },
+        files: ['youtube-timeline-captions.js'],
+      },
+      expect.any(Function),
+    );
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(result.cues[0]?.sourceText).toBe('Hello after injection');
+  });
+
   it('requests the active YouTube tab video time through the content script', async () => {
     const { sendMessage } = installChromeMock({
       ok: true,

@@ -27,6 +27,13 @@ interface ChromeTabsWithMessages {
   sendMessage(tabId: number, message: unknown, callback?: (response: unknown) => void): Promise<unknown> | void;
 }
 
+interface ChromeScriptingWithExecuteScript {
+  executeScript(
+    details: { target: { tabId: number }; files: string[] },
+    callback?: (results: unknown[]) => void,
+  ): Promise<unknown[]> | void;
+}
+
 type YouTubeTimelineCaptionMessage = {
   type: typeof YOUTUBE_TIMELINE_CAPTION_REQUEST;
 };
@@ -169,6 +176,76 @@ function sendTimelineRequest(chromeApi: Chrome, tabs: ChromeTabsWithMessages, ta
   });
 }
 
+function shouldInjectTimelineContentScript(error: unknown): boolean {
+  const message = error instanceof Error
+    ? error.message
+    : isRecord(error) && typeof error.message === 'string'
+      ? error.message
+      : String(error);
+  return (
+    message.includes('The message port closed before a response was received') ||
+    message.includes('Receiving end does not exist') ||
+    message.includes('Could not establish connection')
+  );
+}
+
+function injectTimelineContentScript(chromeApi: Chrome, tabId: number): Promise<void> {
+  const scripting = chromeApi.scripting as ChromeScriptingWithExecuteScript | undefined;
+  if (!scripting?.executeScript) {
+    return Promise.reject(createTimelineError('caption_fetch_failed', 'Chrome scripting API is unavailable'));
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+
+    try {
+      const maybePromise = scripting.executeScript(
+        {
+          target: { tabId },
+          files: ['youtube-timeline-captions.js'],
+        },
+        () => {
+          const runtimeError = chromeApi.runtime.lastError;
+          if (runtimeError) {
+            settle(() => reject(createTimelineError('caption_fetch_failed', runtimeError.message ?? 'Failed to inject YouTube timeline content script')));
+            return;
+          }
+          settle(() => resolve());
+        },
+      );
+
+      if (isPromiseLike<unknown[]>(maybePromise)) {
+        maybePromise.then(
+          () => settle(() => resolve()),
+          (error) => settle(() => reject(error)),
+        );
+      }
+    } catch (error) {
+      settle(() => reject(error));
+    }
+  });
+}
+
+async function sendTimelineRequestWithContentScriptRetry(
+  chromeApi: Chrome,
+  tabs: ChromeTabsWithMessages,
+  tabId: number,
+  message: YouTubeTimelineMessage,
+): Promise<unknown> {
+  try {
+    return await sendTimelineRequest(chromeApi, tabs, tabId, message);
+  } catch (error) {
+    if (!shouldInjectTimelineContentScript(error)) throw error;
+    await injectTimelineContentScript(chromeApi, tabId);
+    return sendTimelineRequest(chromeApi, tabs, tabId, message);
+  }
+}
+
 function getResponseError(response: Record<string, unknown>): { code: TimelineErrorCode; message: string } | null {
   if (response.ok !== false && response.success !== false) return null;
   const error = response.error;
@@ -294,7 +371,7 @@ export async function requestCaptions(): Promise<YouTubeTimelineResponse> {
   const { chromeApi, tabs, tab, videoId } = await getActiveYouTubeTab();
 
   try {
-    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, { type: YOUTUBE_TIMELINE_CAPTION_REQUEST });
+    const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tab.id!, { type: YOUTUBE_TIMELINE_CAPTION_REQUEST });
     return parseTimelineResponse(response, tab, videoId);
   } catch (error) {
     if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
@@ -312,7 +389,7 @@ export async function requestYouTubeVideoTimeFromActiveTab(): Promise<YouTubeVid
   const { chromeApi, tabs, tab } = await getActiveYouTubeTab();
 
   try {
-    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, { type: YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST });
+    const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tab.id!, { type: YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST });
     return parseVideoTimeResponse(response);
   } catch (error) {
     if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
@@ -330,7 +407,7 @@ export async function setYouTubeOriginalAudioMutedFromActiveTab(muted: boolean):
   const { chromeApi, tabs, tab, videoId } = await getActiveYouTubeTab();
 
   try {
-    const response = await sendTimelineRequest(chromeApi, tabs, tab.id!, {
+    const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tab.id!, {
       type: YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST,
       muted,
       videoId,
@@ -356,7 +433,7 @@ export async function setYouTubeOriginalAudioMutedInTab(
   const { chromeApi, tabs } = getChromeTabs();
 
   try {
-    const response = await sendTimelineRequest(chromeApi, tabs, tabId, {
+    const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tabId, {
       type: YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST,
       muted,
       ...(expectedVideoId ? { videoId: expectedVideoId } : {}),

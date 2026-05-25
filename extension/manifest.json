@@ -27,6 +27,7 @@
     "storage",
     "sidePanel",
     "tabs",
+    "scripting",
     "tabCapture",
     "activeTab",
     "declarativeNetRequest"
