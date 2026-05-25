@@ -186,7 +186,7 @@ describe('timelineTranslate', () => {
       '译文:Second',
     ]);
 
-    expect(engine.init).toHaveBeenCalledWith('en', 'zh', undefined);
+    expect(engine.init).toHaveBeenCalledWith('en', 'zh', 'bing-translator');
     expect(engine.translate).toHaveBeenNthCalledWith(1, 'First', expect.any(String), true);
     expect(engine.translate).toHaveBeenNthCalledWith(2, 'Second', expect.any(String), true);
 

@@ -19,6 +19,7 @@ interface TranslationEngineTimelineTranslatorOptions {
 }
 
 const ADJACENT_GAP_TOLERANCE_MS = 250;
+const DEFAULT_TIMELINE_TRANSLATION_MODEL_ID = 'bing-translator';
 
 function normalizeLanguage(language: string): string {
   return language.trim().toLowerCase().split('-')[0] || 'en';
@@ -128,7 +129,7 @@ export class TranslationEngineTimelineTranslator implements TimelineTranslator {
 
   constructor(options: TranslationEngineTimelineTranslatorOptions = {}) {
     this.sourceLanguage = normalizeLanguage(options.sourceLanguage ?? 'en');
-    this.modelId = options.modelId;
+    this.modelId = options.modelId ?? DEFAULT_TIMELINE_TRANSLATION_MODEL_ID;
     this.createEngine = options.createEngine ?? (() => new TranslationEngine());
   }
 

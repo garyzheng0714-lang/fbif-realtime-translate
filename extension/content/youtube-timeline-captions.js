@@ -117,6 +117,14 @@ function getPlayerResponseVideoId(playerResponse) {
   );
 }
 
+function extractInnertubeApiKey(html) {
+  return (
+    html.match(/"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"/)?.[1] ||
+    html.match(/INNERTUBE_API_KEY\\"\s*:\s*\\"([^\\"]+)\\"/)?.[1] ||
+    ''
+  );
+}
+
 function findPlayerResponse(urlVideoId) {
   const scripts = Array.from(document.scripts).reverse();
   let foundStaleResponse = false;
@@ -137,7 +145,7 @@ function findPlayerResponse(urlVideoId) {
   return { playerResponse: null, foundStaleResponse };
 }
 
-async function fetchFreshPlayerResponse(urlVideoId) {
+async function fetchFreshWatchHtml(urlVideoId) {
   const watchUrl = new URL('https://www.youtube.com/watch');
   watchUrl.searchParams.set('v', urlVideoId);
   watchUrl.searchParams.set('hl', 'en');
@@ -146,11 +154,45 @@ async function fetchFreshPlayerResponse(urlVideoId) {
   const response = await fetch(watchUrl.toString(), {
     credentials: 'include',
   });
-  if (!response.ok) return null;
+  if (!response.ok) return '';
 
-  const html = await response.text();
+  return response.text();
+}
+
+function parseFreshPlayerResponse(html, urlVideoId) {
   const playerResponse = parsePlayerResponseFromScript(html);
   if (getPlayerResponseVideoId(playerResponse) !== urlVideoId) return null;
+  return playerResponse;
+}
+
+async function fetchAndroidPlayerResponse(urlVideoId, html) {
+  const apiKey = extractInnertubeApiKey(html);
+  if (!apiKey) return null;
+
+  const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: 'ANDROID',
+          clientVersion: '20.10.38',
+        },
+      },
+      videoId: urlVideoId,
+      contentCheckOk: true,
+      racyCheckOk: true,
+    }),
+  });
+  if (!response.ok) return null;
+
+  const playerResponse = await response.json();
+  if (playerResponse?.playabilityStatus?.status && playerResponse.playabilityStatus.status !== 'OK') {
+    return null;
+  }
   return playerResponse;
 }
 
@@ -204,6 +246,14 @@ async function fetchJson3(track) {
   return JSON.parse(text);
 }
 
+async function fetchSelectedTrackJson3(tracks) {
+  const selectedTrack = selectCaptionTrack(tracks);
+  return {
+    selectedTrack,
+    json3: await fetchJson3(selectedTrack),
+  };
+}
+
 async function getCaptions() {
   const urlVideoId = getCurrentUrlVideoId();
   if (!urlVideoId) {
@@ -211,7 +261,12 @@ async function getCaptions() {
   }
 
   const { playerResponse: pagePlayerResponse, foundStaleResponse } = findPlayerResponse(urlVideoId);
-  const playerResponse = pagePlayerResponse || await fetchFreshPlayerResponse(urlVideoId);
+  let freshHtml = '';
+  let playerResponse = pagePlayerResponse;
+  if (!playerResponse) {
+    freshHtml = await fetchFreshWatchHtml(urlVideoId);
+    playerResponse = freshHtml ? parseFreshPlayerResponse(freshHtml, urlVideoId) : null;
+  }
   if (!playerResponse) {
     if (foundStaleResponse) {
       return makeError('no_video', '当前 YouTube 页面状态尚未同步，请稍后重试。');
@@ -224,17 +279,46 @@ async function getCaptions() {
     return makeError('no_caption_tracks', 'No caption tracks were found for this YouTube video.');
   }
 
-  const selectedTrack = selectCaptionTrack(tracks);
-
   try {
-    const json3 = await fetchJson3(selectedTrack);
+    let selectedTrack = selectCaptionTrack(tracks);
+    let json3 = null;
+    let resolvedTracks = tracks;
+    let webCaptionError = null;
+
+    try {
+      json3 = await fetchJson3(selectedTrack);
+    } catch (error) {
+      webCaptionError = error;
+    }
+
+    if (!json3?.events && !freshHtml) {
+      freshHtml = await fetchFreshWatchHtml(urlVideoId);
+    }
+
+    if (!json3?.events) {
+      const androidPlayerResponse = freshHtml
+        ? await fetchAndroidPlayerResponse(urlVideoId, freshHtml)
+        : null;
+      const androidTracks = readCaptionTracks(androidPlayerResponse);
+      if (androidTracks.length > 0) {
+        const androidResult = await fetchSelectedTrackJson3(androidTracks);
+        selectedTrack = androidResult.selectedTrack;
+        json3 = androidResult.json3;
+        resolvedTracks = androidTracks;
+      }
+    }
+
+    if (!json3?.events && webCaptionError) {
+      throw webCaptionError;
+    }
+
     return {
       ok: true,
       payload: {
         videoId: urlVideoId,
         title: playerResponse?.videoDetails?.title || document.title || '',
         sourceLanguage: selectedTrack.languageCode,
-        tracks,
+        tracks: resolvedTracks,
         json3,
       },
     };

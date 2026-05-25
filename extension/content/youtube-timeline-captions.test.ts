@@ -170,6 +170,139 @@ describe('youtube timeline captions content script', () => {
     );
   });
 
+  it('falls back to Android player captions when the web timedtext track is empty', async () => {
+    const video = { muted: false };
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const requestUrl = String(url);
+      if (requestUrl.includes('/watch?')) {
+        return {
+          ok: true,
+          text: async () => `
+            <script>
+              window.ytInitialPlayerResponse = {
+                "videoDetails": { "videoId": "video-123", "title": "Fresh video title" },
+                "captions": {
+                  "playerCaptionsTracklistRenderer": {
+                    "captionTracks": [{
+                      "baseUrl": "https://www.youtube.com/api/timedtext?source=web&v=video-123&lang=en",
+                      "languageCode": "en",
+                      "name": { "simpleText": "English" },
+                      "kind": "asr",
+                      "isTranslatable": true
+                    }]
+                  }
+                }
+              };
+              window.ytInitialData = { "INNERTUBE_API_KEY": "test-key" };
+            </script>
+          `,
+        };
+      }
+
+      if (requestUrl.includes('/youtubei/v1/player')) {
+        return {
+          ok: true,
+          json: async () => ({
+            playabilityStatus: { status: 'OK' },
+            captions: {
+              playerCaptionsTracklistRenderer: {
+                captionTracks: [{
+                  baseUrl: 'https://www.youtube.com/api/timedtext?source=android&v=video-123&lang=en&fmt=srv3',
+                  languageCode: 'en',
+                  name: { simpleText: 'English' },
+                  kind: 'asr',
+                  isTranslatable: true,
+                }],
+              },
+            },
+          }),
+        };
+      }
+
+      if (requestUrl.includes('source=web')) {
+        return {
+          ok: true,
+          text: async () => '',
+        };
+      }
+
+      if (requestUrl.includes('source=android')) {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({
+            events: [
+              {
+                tStartMs: 2500,
+                dDurationMs: 1000,
+                segs: [{ utf8: 'Android fallback caption' }],
+              },
+            ],
+          }),
+        };
+      }
+
+      throw new Error(`Unexpected fetch ${requestUrl} ${JSON.stringify(init)}`);
+    });
+    let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void) | null = null;
+    const context = vm.createContext({
+      URL,
+      fetch: fetchMock,
+      console,
+      window: { location: { href: 'https://www.youtube.com/watch?v=video-123&t=42s' } },
+      document: {
+        scripts: [],
+        title: 'SPA Video',
+        querySelector: vi.fn((selector: string) => (selector === 'video' ? video : null)),
+      },
+      chrome: {
+        runtime: {
+          onMessage: {
+            addListener: vi.fn((callback) => {
+              listener = callback;
+            }),
+          },
+        },
+      },
+    });
+    vm.runInContext(fs.readFileSync(scriptPath, 'utf8'), context);
+
+    const response = await new Promise<any>((resolve) => {
+      listener?.({ type: 'fbif:youtube-timeline:v2:get-captions' }, {}, resolve);
+    });
+
+    expect(response).toMatchObject({
+      ok: true,
+      payload: {
+        videoId: 'video-123',
+        title: 'Fresh video title',
+        sourceLanguage: 'en',
+      },
+    });
+    expect(response.payload.json3.events[0].segs[0].utf8).toBe('Android fallback caption');
+
+    const androidCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/youtubei/v1/player'));
+    expect(androidCall).toBeTruthy();
+    expect(androidCall?.[0]).toBe('https://www.youtube.com/youtubei/v1/player?key=test-key');
+    expect(androidCall?.[1]).toMatchObject({
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'content-type': 'application/json',
+      },
+    });
+    expect(JSON.parse(String(androidCall?.[1]?.body))).toMatchObject({
+      context: {
+        client: {
+          clientName: 'ANDROID',
+          clientVersion: '20.10.38',
+        },
+      },
+      videoId: 'video-123',
+      contentCheckOk: true,
+      racyCheckOk: true,
+    });
+  });
+
   it('installs a v2 listener even when an already-open page has the stale v1 loaded flag', () => {
     let listener: ((message: unknown, sender: unknown, sendResponse: (response: unknown) => void) => void) | null = null;
     const context = vm.createContext({
