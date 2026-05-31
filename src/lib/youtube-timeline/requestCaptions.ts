@@ -379,12 +379,15 @@ async function getActiveYouTubeTab(): Promise<{ chromeApi: Chrome; tabs: ChromeT
   return { chromeApi, tabs, tab, videoId };
 }
 
-export async function requestCaptions(): Promise<YouTubeTimelineResponse> {
+export async function requestCaptions(): Promise<YouTubeTimelineResponse & { tabId: number }> {
   const { chromeApi, tabs, tab, videoId } = await getActiveYouTubeTab();
 
   try {
     const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tab.id!, { type: YOUTUBE_TIMELINE_CAPTION_REQUEST });
-    return parseTimelineResponse(response, tab, videoId);
+    // Surface the resolved tab id so the timeline tick can poll video time from
+    // this exact tab for the rest of the session instead of re-querying the
+    // active tab every frame.
+    return { ...parseTimelineResponse(response, tab, videoId), tabId: tab.id! };
   } catch (error) {
     if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
       throw error;
@@ -402,6 +405,28 @@ export async function requestYouTubeVideoTimeFromActiveTab(): Promise<YouTubeVid
 
   try {
     const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tab.id!, { type: YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST });
+    return parseVideoTimeResponse(response);
+  } catch (error) {
+    if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
+      throw error;
+    }
+    if (isRecord(error) && isTimelineErrorCode(error.code)) {
+      throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
+    }
+    const message = error instanceof Error ? error.message : 'Failed to request YouTube video time';
+    throw createTimelineError('caption_fetch_failed', message);
+  }
+}
+
+export async function requestYouTubeVideoTimeFromTab(tabId: number): Promise<YouTubeVideoTimeResponse> {
+  // The session's tab is fixed once captions are fetched, so poll video time
+  // straight from that tab id. This skips the per-frame tabs.query + URL
+  // validation that requestYouTubeVideoTimeFromActiveTab does, and removes the
+  // risk of latching onto a different tab the user switched to mid-session.
+  const { chromeApi, tabs } = getChromeTabs();
+
+  try {
+    const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tabId, { type: YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST });
     return parseVideoTimeResponse(response);
   } catch (error) {
     if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {

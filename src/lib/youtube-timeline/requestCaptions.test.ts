@@ -4,6 +4,7 @@ import {
   setYouTubeOriginalAudioMutedInTab,
   setYouTubeOriginalAudioMutedFromActiveTab,
   requestYouTubeVideoTimeFromActiveTab,
+  requestYouTubeVideoTimeFromTab,
   YOUTUBE_TIMELINE_CAPTION_REQUEST,
   YOUTUBE_TIMELINE_ORIGINAL_AUDIO_MUTE_REQUEST,
   YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST,
@@ -88,6 +89,36 @@ describe('requestCaptions', () => {
         },
       ],
     });
+  });
+
+  // WHY: the timeline tick needs the exact tab the captions were fetched from so
+  // every later video-time poll targets that one tab directly. If requestCaptions
+  // did not surface the tab id, MainPanel would have to re-query the active tab
+  // each frame (the redundant tabs.query this optimization removes) and could
+  // even latch onto a different tab the user switched to mid-session.
+  it('returns the resolved tab id alongside the caption payload', async () => {
+    installChromeMock({
+      ok: true,
+      payload: {
+        videoId: 'video-123',
+        title: 'Real video title',
+        sourceLanguage: 'en',
+        tracks: [],
+        json3: {
+          events: [
+            {
+              tStartMs: 1000,
+              dDurationMs: 1500,
+              segs: [{ utf8: 'Hello timeline' }],
+            },
+          ],
+        },
+      },
+    });
+
+    const result = await requestCaptions();
+
+    expect(result.tabId).toBe(activeYouTubeTab.id);
   });
 
   it('uses v2 message types so stale listeners on already-open YouTube pages do not answer', () => {
@@ -222,6 +253,73 @@ describe('requestCaptions', () => {
       durationMs: 60000,
       paused: false,
       videoId: 'video-123',
+    });
+  });
+
+  // WHY: the tab is fixed for the whole session once captions are fetched, so the
+  // tick must read its video time straight from that tab id. Re-running
+  // tabs.query({active,currentWindow}) + URL validation every 350ms is wasted
+  // cross-process work and risks reading a different tab if the user switches
+  // away. This variant sends the video-time request to the given tab id and never
+  // queries the active tab.
+  it('requests video time from a specific tab id without querying the active tab', async () => {
+    const { query, sendMessage } = installChromeMock({
+      ok: true,
+      payload: {
+        currentTimeMs: 8000,
+        durationMs: 60000,
+        paused: true,
+        videoId: 'video-123',
+      },
+    });
+
+    const result = await requestYouTubeVideoTimeFromTab(42);
+
+    expect(query).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      42,
+      { type: YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST },
+      expect.any(Function),
+    );
+    expect(result).toEqual({
+      currentTimeMs: 8000,
+      durationMs: 60000,
+      paused: true,
+      videoId: 'video-123',
+    });
+  });
+
+  // WHY: the same NaN-poisoning guard that protects the active-tab path must
+  // protect the tab-id path, otherwise an unloaded video reached by tab id would
+  // feed NaN into the tick clock and silently stall the session.
+  it('rejects a non-finite current time from the tab-id path', async () => {
+    installChromeMock({
+      ok: true,
+      payload: {
+        currentTimeMs: Number.NaN,
+        durationMs: 60000,
+        paused: false,
+        videoId: 'video-123',
+      },
+    });
+
+    await expect(requestYouTubeVideoTimeFromTab(42)).rejects.toMatchObject({
+      code: 'caption_fetch_failed',
+    });
+  });
+
+  it('preserves content script error codes from the tab-id video time path', async () => {
+    installChromeMock({
+      ok: false,
+      error: {
+        code: 'no_video',
+        message: 'No video element was found.',
+      },
+    });
+
+    await expect(requestYouTubeVideoTimeFromTab(42)).rejects.toMatchObject({
+      code: 'no_video',
+      message: 'No video element was found.',
     });
   });
 
