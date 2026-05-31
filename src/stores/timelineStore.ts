@@ -44,7 +44,7 @@ const getErrorMessage = (error: string | Error): string => (
 );
 
 const useTimelineStore = create<TimelineStore>()(
-  subscribeWithSelector((set) => ({
+  subscribeWithSelector((set, get) => ({
     ...initialTimelineState,
 
     setLoadingCaptions: (videoId = null, title = '') => {
@@ -70,6 +70,18 @@ const useTimelineStore = create<TimelineStore>()(
     },
 
     setPlaying: (activeCueId = null) => {
+      // MainPanel's tick calls this ~3x/second with the same activeCueId for
+      // the whole duration a caption is on screen. A zustand set() always
+      // notifies every subscribeWithSelector listener regardless of whether
+      // the value changed, so short-circuit when nothing would actually move.
+      const current = get();
+      if (
+        current.status === 'playing' &&
+        current.activeCueId === activeCueId &&
+        current.error === null
+      ) {
+        return;
+      }
       set({
         status: 'playing',
         activeCueId,

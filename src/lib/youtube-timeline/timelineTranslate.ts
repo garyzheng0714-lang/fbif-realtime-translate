@@ -20,6 +20,10 @@ interface TranslationEngineTimelineTranslatorOptions {
 
 const ADJACENT_GAP_TOLERANCE_MS = 250;
 const DEFAULT_TIMELINE_TRANSLATION_MODEL_ID = 'bing-translator';
+// Bing is a request/response worker that pairs replies by id, so several translate
+// calls can be in flight at once. Cap the fan-out so a dense caption window does not
+// hammer Bing into rate-limiting while still translating far faster than serial.
+const MAX_CONCURRENT_TRANSLATIONS = 5;
 
 function normalizeLanguage(language: string): string {
   return language.trim().toLowerCase().split('-')[0] || 'en';
@@ -43,32 +47,45 @@ function isAdjacent(previous: TimelineCue, next: TimelineCue): boolean {
   return next.startMs - previous.endMs <= ADJACENT_GAP_TOLERANCE_MS;
 }
 
-export function mergeShortCues(cues: TimelineCue[], minDurationMs = 1800): TimelineCue[] {
-  const merged: TimelineCue[] = [];
+interface MergedCueGroup {
+  merged: TimelineCue;
+  sources: TimelineCue[];
+}
+
+function mergeShortCueGroups(cues: TimelineCue[], minDurationMs: number): MergedCueGroup[] {
+  // Sort defensively: adjacency is decided from neighbouring start/end times, so an
+  // unsorted input would otherwise group time-disjoint cues. parseYouTubeJson3 already
+  // sorts, but this helper must not depend on its callers staying ordered.
+  const ordered = [...cues].sort((a, b) => a.startMs - b.startMs);
+  const groups: MergedCueGroup[] = [];
   let index = 0;
 
-  while (index < cues.length) {
-    const group = [cues[index]];
-    let groupEndMs = cues[index].endMs;
+  while (index < ordered.length) {
+    const group = [ordered[index]];
+    let groupEndMs = ordered[index].endMs;
     let nextIndex = index + 1;
 
     while (
       groupEndMs - group[0].startMs < minDurationMs &&
-      nextIndex < cues.length &&
-      isAdjacent(group[group.length - 1], cues[nextIndex]) &&
-      cueDuration(cues[nextIndex]) < minDurationMs &&
-      cues[nextIndex].endMs - group[0].startMs <= minDurationMs
+      nextIndex < ordered.length &&
+      isAdjacent(group[group.length - 1], ordered[nextIndex]) &&
+      cueDuration(ordered[nextIndex]) < minDurationMs &&
+      ordered[nextIndex].endMs - group[0].startMs <= minDurationMs
     ) {
-      group.push(cues[nextIndex]);
-      groupEndMs = cues[nextIndex].endMs;
+      group.push(ordered[nextIndex]);
+      groupEndMs = ordered[nextIndex].endMs;
       nextIndex += 1;
     }
 
-    merged.push(mergeCueGroup(group));
+    groups.push({ merged: mergeCueGroup(group), sources: group });
     index += group.length;
   }
 
-  return merged;
+  return groups;
+}
+
+export function mergeShortCues(cues: TimelineCue[], minDurationMs = 1800): TimelineCue[] {
+  return mergeShortCueGroups(cues, minDurationMs).map((group) => group.merged);
 }
 
 export async function translateTimelineCueBatch(
@@ -83,17 +100,17 @@ export async function translateTimelineCueBatch(
     throw new Error(`翻译结果数量不匹配：请求 ${texts.length} 条，返回 ${translatedTexts.length} 条`);
   }
 
-  return cues.map((cue, index) => ({
-    ...cue,
-    translatedText: validateTranslatedText(translatedTexts[index], index),
-  }));
-}
-
-function validateTranslatedText(text: string, index: number): string {
-  if (text.trim() === '') {
-    throw new Error(`翻译结果为空：第 ${index + 1} 条字幕没有可朗读的中文译文`);
-  }
-  return text;
+  // Degrade per-cue on a blank result instead of throwing: a single empty Bing reply
+  // is normal jitter, and throwing would bubble through translateCueWindow ->
+  // failTimeline and stop the whole session. Leaving translatedText untouched (undefined)
+  // makes getTimelineCuesToTranslate re-select the cue on a later window for a retry.
+  return cues.map((cue, index) => {
+    const translatedText = translatedTexts[index];
+    if (translatedText.trim() === '') {
+      return cue;
+    }
+    return { ...cue, translatedText };
+  });
 }
 
 export function getTimelineCuesToTranslate(
@@ -113,8 +130,22 @@ export async function translateTimelineCues(
   translator: TimelineTranslator,
   targetLanguage = 'zh',
 ): Promise<TimelineCue[]> {
-  const merged = mergeShortCues(cues);
-  return translateTimelineCueBatch(merged, translator, targetLanguage);
+  const groups = mergeShortCueGroups(cues, 1800);
+  const translatedMerged = await translateTimelineCueBatch(
+    groups.map((group) => group.merged),
+    translator,
+    targetLanguage,
+  );
+
+  // Fan the merged translation back onto each original cue so the result keeps the
+  // ORIGINAL cue ids. MainPanel keys translated text by original id, so returning the
+  // synthetic 'a+b' merged id would lose the translation for every source cue.
+  return groups.flatMap((group, index) => {
+    const { translatedText } = translatedMerged[index];
+    return group.sources.map((cue) => (
+      translatedText === undefined ? cue : { ...cue, translatedText }
+    ));
+  });
 }
 
 export class TranslationEngineTimelineTranslator implements TimelineTranslator {
@@ -150,16 +181,30 @@ export class TranslationEngineTimelineTranslator implements TimelineTranslator {
     const normalizedTargetLanguage = normalizeLanguage(targetLanguage);
     const engine = await this.ensureEngine(normalizedTargetLanguage, generation);
     const prompt = buildDefaultLocalPrompt(this.sourceLanguage, normalizedTargetLanguage);
-    const translatedTexts: string[] = [];
+    const translatedTexts = new Array<string>(texts.length);
 
     try {
-      for (const text of texts) {
-        const result = await this.withDisposeGuard(
-          engine.translate(text, prompt, true),
-          generation,
-        );
-        translatedTexts.push(validateTranslatedText(result.translatedText, translatedTexts.length));
-      }
+      // Translate concurrently with a bounded worker pool. A serial for-await made a
+      // dense window cost N x RTT and pushed recent captions behind older ones; the
+      // pool keeps up to MAX_CONCURRENT_TRANSLATIONS round-trips in flight while
+      // preserving input order in the result array. Blank replies are kept as-is here
+      // and dropped per-cue by translateTimelineCueBatch rather than failing the batch.
+      let nextIndex = 0;
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const index = nextIndex;
+          nextIndex += 1;
+          if (index >= texts.length) return;
+          const result = await this.withDisposeGuard(
+            engine.translate(texts[index], prompt, true),
+            generation,
+          );
+          translatedTexts[index] = result.translatedText;
+        }
+      };
+
+      const poolSize = Math.min(MAX_CONCURRENT_TRANSLATIONS, texts.length);
+      await Promise.all(Array.from({ length: poolSize }, () => worker()));
     } catch (error) {
       if (this.isDisposedError(error)) throw error;
       throw this.createUnavailableError(error);

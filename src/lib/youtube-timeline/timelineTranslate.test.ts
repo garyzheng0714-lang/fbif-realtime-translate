@@ -88,7 +88,12 @@ describe('timelineTranslate', () => {
     expect(mergeShortCues(nearThresholdCues, 1800)).toEqual(nearThresholdCues);
   });
 
-  it('maps batch translations back onto merged cues', async () => {
+  // WHY: mergeShortCues fuses adjacent cues into a synthetic 'a+b' id, but MainPanel
+  // keys translated text back by the ORIGINAL cue id. If translateTimelineCues returned
+  // the merged cue, every original cue ('a','b') would miss the lookup and silently fall
+  // back to the English source. Fanning the merged translation back onto each original
+  // cue keeps the id contract consistent so the translation actually reaches the cue.
+  it('maps a merged translation back onto every original cue id', async () => {
     const translator = {
       translateBatch: vi.fn(async (texts: string[]) => texts.map((text) => `中文:${text}`)),
     };
@@ -96,9 +101,30 @@ describe('timelineTranslate', () => {
     const translated = await translateTimelineCues(cues, translator, 'zh');
 
     expect(translator.translateBatch).toHaveBeenCalledWith(['Hello world', 'Long enough'], 'zh');
+    expect(translated.map((cue) => cue.id)).toEqual(['a', 'b', 'c']);
     expect(translated.map((cue) => cue.translatedText)).toEqual([
       '中文:Hello world',
+      '中文:Hello world',
       '中文:Long enough',
+    ]);
+  });
+
+  // WHY: mergeShortCues assumes ascending input order to decide adjacency. parseYouTubeJson3
+  // now sorts, but the merge helper must not silently group time-disjoint cues if it is
+  // ever handed an unsorted array, so it sorts defensively at the entry point.
+  it('sorts unsorted input before merging adjacent cues', () => {
+    const unsorted: TimelineCue[] = [cues[2], cues[0], cues[1]];
+
+    const merged = mergeShortCues(unsorted, 1800);
+
+    expect(merged).toEqual([
+      {
+        id: 'a+b',
+        startMs: 0,
+        endMs: 1500,
+        sourceText: 'Hello world',
+      },
+      cues[2],
     ]);
   });
 
@@ -156,14 +182,20 @@ describe('timelineTranslate', () => {
     );
   });
 
-  it('fails loud when the translator returns an empty translation', async () => {
+  // WHY: Bing translation occasionally returns an empty string for a single cue as
+  // normal jitter. Throwing on it used to bubble up through translateCueWindow ->
+  // failTimeline and stop the entire video session on the first blank result, which on
+  // long videos is almost guaranteed. Degrade per-cue: leave translatedText undefined so
+  // getTimelineCuesToTranslate re-selects it on the next window instead of killing the run.
+  it('skips an empty translation per-cue instead of failing the whole session', async () => {
     const translator = {
-      translateBatch: vi.fn(async () => ['   ']),
+      translateBatch: vi.fn(async () => ['   ', '中文:world']),
     };
 
-    await expect(translateTimelineCueBatch([cues[0]], translator, 'zh')).rejects.toThrow(
-      /翻译结果为空/,
-    );
+    const translated = await translateTimelineCueBatch(cues.slice(0, 2), translator, 'zh');
+
+    expect(translated[0].translatedText).toBeUndefined();
+    expect(translated[1].translatedText).toBe('中文:world');
   });
 
   it('uses the injected translation engine in order without starting a real worker', async () => {
@@ -192,6 +224,107 @@ describe('timelineTranslate', () => {
 
     translator.dispose();
     expect(engine.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  // WHY: tick passes the whole [now, now+prebuffer] window as one batch every 350ms.
+  // Awaiting each Bing round-trip serially makes a dense N-cue window take N x RTT, so
+  // recently-entered captions wait behind older ones and subtitles fall behind playback.
+  // The worker is request/response and pairs replies by id, so multiple translate calls
+  // can be in flight at once. This asserts the batch fires concurrently rather than
+  // strictly one-at-a-time.
+  it('translates a batch concurrently instead of one round-trip at a time', async () => {
+    const inflight: string[] = [];
+    const deferreds = new Map<string, ReturnType<typeof createDeferred<{
+      sourceText: string;
+      translatedText: string;
+      inferenceTimeMs: number;
+    }>>>();
+    const engine = {
+      init: vi.fn(async () => ({ loadTimeMs: 1, device: 'mock' })),
+      translate: vi.fn((text: string) => {
+        inflight.push(text);
+        const deferred = createDeferred<{
+          sourceText: string;
+          translatedText: string;
+          inferenceTimeMs: number;
+        }>();
+        deferreds.set(text, deferred);
+        return deferred.promise;
+      }),
+      dispose: vi.fn(),
+    };
+    const translator = new TranslationEngineTimelineTranslator({
+      createEngine: () => engine,
+    });
+
+    const batch = translator.translateBatch(['First', 'Second', 'Third'], 'zh');
+    await waitForCondition(() => inflight.length === 3);
+
+    // All three are in flight before any of them has resolved: proves concurrency.
+    expect(inflight).toEqual(['First', 'Second', 'Third']);
+
+    for (const text of ['First', 'Second', 'Third']) {
+      deferreds.get(text)!.resolve({
+        sourceText: text,
+        translatedText: `译文:${text}`,
+        inferenceTimeMs: 1,
+      });
+    }
+
+    await expect(batch).resolves.toEqual(['译文:First', '译文:Second', '译文:Third']);
+  });
+
+  // WHY: a single blank result from the engine must not abort the batch. Returning an
+  // empty placeholder (rather than throwing) lets translateTimelineCueBatch drop just
+  // that cue and keep the session alive.
+  it('does not throw when the engine returns a blank translation for one cue', async () => {
+    const engine = {
+      init: vi.fn(async () => ({ loadTimeMs: 1, device: 'mock' })),
+      translate: vi.fn(async (text: string) => ({
+        sourceText: text,
+        translatedText: text === 'Blank' ? '   ' : `译文:${text}`,
+        inferenceTimeMs: 1,
+      })),
+      dispose: vi.fn(),
+    };
+    const translator = new TranslationEngineTimelineTranslator({
+      createEngine: () => engine,
+    });
+
+    const result = await translator.translateBatch(['First', 'Blank'], 'zh');
+
+    expect(result[0]).toBe('译文:First');
+    expect(result[1].trim()).toBe('');
+  });
+
+  // WHY: latency fix must not let an unbounded fan-out hammer Bing into rate-limiting.
+  // A large window should respect a concurrency ceiling rather than firing every cue at
+  // once, while still being far more parallel than strict serial execution.
+  it('caps how many translations run at once for a large window', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const engine = {
+      init: vi.fn(async () => ({ loadTimeMs: 1, device: 'mock' })),
+      translate: vi.fn(async (text: string) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await Promise.resolve();
+        await Promise.resolve();
+        active -= 1;
+        return { sourceText: text, translatedText: `译文:${text}`, inferenceTimeMs: 1 };
+      }),
+      dispose: vi.fn(),
+    };
+    const translator = new TranslationEngineTimelineTranslator({
+      createEngine: () => engine,
+    });
+
+    const texts = Array.from({ length: 12 }, (_unused, index) => `cue-${index}`);
+    const result = await translator.translateBatch(texts, 'zh');
+
+    expect(result).toHaveLength(12);
+    expect(maxActive).toBeGreaterThan(1);
+    expect(maxActive).toBeLessThanOrEqual(5);
   });
 
   it('rejects pending engine initialization on dispose so restart cannot leave translation hanging', async () => {

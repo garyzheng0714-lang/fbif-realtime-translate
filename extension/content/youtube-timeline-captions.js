@@ -23,6 +23,19 @@ function validateOriginalAudioMuteMessage(message) {
   return null;
 }
 
+// Bound every startup network hop so a single slow/hung response cannot block
+// caption fetching indefinitely (which would leave the user "connected" with no
+// first dubbed line). Returns undefined where AbortSignal.timeout is missing so
+// older runtimes still issue the fetch un-aborted rather than throwing.
+const NETWORK_FETCH_TIMEOUT_MS = 5000;
+
+function buildFetchSignal() {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(NETWORK_FETCH_TIMEOUT_MS);
+  }
+  return undefined;
+}
+
 function readTrackName(track) {
   if (track?.name?.simpleText) return track.name.simpleText;
   if (Array.isArray(track?.name?.runs)) {
@@ -125,6 +138,40 @@ function extractInnertubeApiKey(html) {
   );
 }
 
+// Conservative fallback only used when the page exposes no client version.
+// A hard-coded version eventually goes stale and the server rejects it, so we
+// prefer the live value from the page's ytcfg / INNERTUBE_CONTEXT.
+const FALLBACK_INNERTUBE_CLIENT_VERSION = '20.10.38';
+
+function extractInnertubeClientVersion(html) {
+  return (
+    html.match(/"INNERTUBE_CONTEXT_CLIENT_VERSION"\s*:\s*"([^"]+)"/)?.[1] ||
+    html.match(/"clientVersion"\s*:\s*"([^"]+)"/)?.[1] ||
+    html.match(/clientVersion\\"\s*:\s*\\"([^\\"]+)\\"/)?.[1] ||
+    FALLBACK_INNERTUBE_CLIENT_VERSION
+  );
+}
+
+// The live player exposes the same data the page-injected global carries, so
+// preferring it when the script scan finds nothing avoids an extra watch-HTML
+// round trip and survives YouTube changing how ytInitialPlayerResponse is
+// injected (the script-text parse is otherwise a single fragile point).
+function readPlayerResponseFromApi(urlVideoId) {
+  const moviePlayer = document.querySelector('#movie_player');
+  const getPlayerResponse = moviePlayer?.getPlayerResponse;
+  if (typeof getPlayerResponse !== 'function') return null;
+
+  let playerResponse = null;
+  try {
+    playerResponse = getPlayerResponse.call(moviePlayer);
+  } catch {
+    return null;
+  }
+  if (!playerResponse) return null;
+  if (getPlayerResponseVideoId(playerResponse) !== urlVideoId) return null;
+  return playerResponse;
+}
+
 function findPlayerResponse(urlVideoId) {
   const scripts = Array.from(document.scripts).reverse();
   let foundStaleResponse = false;
@@ -153,6 +200,7 @@ async function fetchFreshWatchHtml(urlVideoId) {
 
   const response = await fetch(watchUrl.toString(), {
     credentials: 'include',
+    signal: buildFetchSignal(),
   });
   if (!response.ok) return '';
 
@@ -169,9 +217,12 @@ async function fetchAndroidPlayerResponse(urlVideoId, html) {
   const apiKey = extractInnertubeApiKey(html);
   if (!apiKey) return null;
 
+  const clientVersion = extractInnertubeClientVersion(html);
+
   const response = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${apiKey}`, {
     method: 'POST',
     credentials: 'include',
+    signal: buildFetchSignal(),
     headers: {
       'content-type': 'application/json',
     },
@@ -179,7 +230,7 @@ async function fetchAndroidPlayerResponse(urlVideoId, html) {
       context: {
         client: {
           clientName: 'ANDROID',
-          clientVersion: '20.10.38',
+          clientVersion,
         },
       },
       videoId: urlVideoId,
@@ -232,6 +283,7 @@ function withJson3Format(baseUrl) {
 async function fetchJson3(track) {
   const response = await fetch(withJson3Format(track.baseUrl), {
     credentials: 'include',
+    signal: buildFetchSignal(),
   });
 
   if (!response.ok) {
@@ -262,7 +314,7 @@ async function getCaptions() {
 
   const { playerResponse: pagePlayerResponse, foundStaleResponse } = findPlayerResponse(urlVideoId);
   let freshHtml = '';
-  let playerResponse = pagePlayerResponse;
+  let playerResponse = pagePlayerResponse || readPlayerResponseFromApi(urlVideoId);
   if (!playerResponse) {
     freshHtml = await fetchFreshWatchHtml(urlVideoId);
     playerResponse = freshHtml ? parseFreshPlayerResponse(freshHtml, urlVideoId) : null;
@@ -330,8 +382,38 @@ async function getCaptions() {
   }
 }
 
+function getMainVideo() {
+  // Prefer the YouTube main player. A watch page often hosts several <video>
+  // elements (hover-preview thumbnails, ads, picture-in-picture); a bare
+  // document.querySelector('video') returns DOM-order-first, which is usually
+  // NOT the main player. The 350ms tick reads currentTime to drive scheduling
+  // and we must mute the main player's original audio, so both callers need
+  // the same, correct element.
+  const scoped =
+    document.querySelector('#movie_player video') ||
+    document.querySelector('.html5-main-video');
+  if (scoped) return scoped;
+
+  const all =
+    typeof document.querySelectorAll === 'function'
+      ? Array.from(document.querySelectorAll('video'))
+      : [];
+  if (all.length === 0) return document.querySelector('video');
+
+  // Fall back to an actually-playing, decoded video; otherwise the largest one.
+  const playing = all.filter((video) => !video.paused && video.readyState > 2);
+  const candidates = playing.length > 0 ? playing : all;
+  return candidates.reduce((largest, video) => {
+    const rect = typeof video.getBoundingClientRect === 'function' ? video.getBoundingClientRect() : null;
+    const area = rect ? rect.width * rect.height : 0;
+    const largestRect = typeof largest.getBoundingClientRect === 'function' ? largest.getBoundingClientRect() : null;
+    const largestArea = largestRect ? largestRect.width * largestRect.height : 0;
+    return area > largestArea ? video : largest;
+  }, candidates[0]);
+}
+
 function getVideoTime() {
-  const video = document.querySelector('video');
+  const video = getMainVideo();
   if (!video) {
     return makeError('no_video', 'No YouTube video element was found on this page.');
   }
@@ -347,6 +429,12 @@ function getVideoTime() {
   };
 }
 
+// Snapshot of the user's original mute state captured the first time the
+// extension mutes the original audio in a session. Repeated mute(true) calls
+// (or the user toggling YouTube's own mute) must NOT overwrite it, so restore
+// reports the true pre-intervention value instead of the now-live state.
+let capturedOriginalMuted = null;
+
 function setOriginalAudioMuted(muted, expectedVideoId) {
   const currentVideoId = getCurrentUrlVideoId();
   if (expectedVideoId && currentVideoId !== expectedVideoId) {
@@ -356,13 +444,25 @@ function setOriginalAudioMuted(muted, expectedVideoId) {
     );
   }
 
-  const video = document.querySelector('video');
+  const video = getMainVideo();
   if (!video) {
     return makeError('no_video', 'No YouTube video element was found on this page.');
   }
 
-  const previousMuted = video.muted;
+  if (muted) {
+    // Capture the pre-intervention state once, on the first mute of a session.
+    if (capturedOriginalMuted === null) {
+      capturedOriginalMuted = video.muted;
+    }
+  }
+
+  const previousMuted = capturedOriginalMuted === null ? video.muted : capturedOriginalMuted;
   video.muted = muted;
+
+  if (!muted) {
+    // Restore complete; clear the snapshot so the next session re-captures.
+    capturedOriginalMuted = null;
+  }
 
   return {
     ok: true,

@@ -247,7 +247,10 @@ async function sendTimelineRequestWithContentScriptRetry(
 }
 
 function getResponseError(response: Record<string, unknown>): { code: TimelineErrorCode; message: string } | null {
-  if (response.ok !== false && response.success !== false) return null;
+  // The content script contract is strictly { ok: true, payload } or { ok: false, error }.
+  // Only ok === true is success; anything else (missing/non-boolean ok) is a fetch error,
+  // so a malformed reply surfaces a real caption_fetch_failed instead of slipping through.
+  if (response.ok === true) return null;
   const error = response.error;
   const code = isRecord(error) && isTimelineErrorCode(error.code)
     ? error.code
@@ -282,9 +285,10 @@ function parseTimelineResponse(response: unknown, tab: ChromeTab, fallbackVideoI
     throw createTimelineError(responseError.code, responseError.message);
   }
 
+  // getResponseError already guaranteed ok === true here, so the captions always live at
+  // payload.json3; the previous legacy fallback fields did not match the real contract.
   const payload = isRecord(response.payload) ? response.payload : response;
-  const json3 = response.ok === true ? payload.json3 : response.json3 ?? response.captionJson3 ?? response.captions ?? response;
-  const cues = parseYouTubeJson3(json3);
+  const cues = parseYouTubeJson3(payload.json3);
   if (cues.length === 0) {
     throw createTimelineError('caption_parse_failed', 'No usable caption cues were parsed');
   }
@@ -314,7 +318,15 @@ function parseVideoTimeResponse(response: unknown): YouTubeVideoTimeResponse {
   }
 
   const payload = isRecord(response.payload) ? response.payload : response;
-  if (typeof payload.currentTimeMs !== 'number' || typeof payload.paused !== 'boolean' || typeof payload.videoId !== 'string') {
+  // Reject NaN/Infinity/negative times: typeof NaN === 'number', so an unloaded video
+  // (video.currentTime === NaN) would otherwise pass and poison every tick comparison.
+  if (
+    typeof payload.currentTimeMs !== 'number' ||
+    !Number.isFinite(payload.currentTimeMs) ||
+    payload.currentTimeMs < 0 ||
+    typeof payload.paused !== 'boolean' ||
+    typeof payload.videoId !== 'string'
+  ) {
     throw createTimelineError('caption_fetch_failed', 'Content script returned an incomplete video time response');
   }
 

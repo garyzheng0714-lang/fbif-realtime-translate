@@ -32,6 +32,16 @@ export class TabAudioRecorder extends ParticipantRecorder {
 
     if (!this.passthrough) {
       console.info(`${this.getLogPrefix()} Tab audio passthrough disabled`);
+      // With passthrough off (path A), setSinkId below never runs, so an
+      // output device passed here is dropped. The translated audio is routed
+      // by ModernAudioPlayer instead. Warn loudly rather than silently ignore
+      // the device, so a mismatched device selection is debuggable.
+      if (this.outputDeviceId) {
+        console.warn(
+          `${this.getLogPrefix()} Output device ignored while passthrough is off (routed by player instead):`,
+          this.outputDeviceId
+        );
+      }
       return;
     }
 
@@ -70,17 +80,26 @@ export class TabAudioRecorder extends ParticipantRecorder {
     this.streamId = response.streamId || null;
     console.info(`${this.getLogPrefix()} Received streamId:`, this.streamId);
 
-    // Get media stream using Chrome tab capture
-    return navigator.mediaDevices.getUserMedia({
-      audio: {
-        // @ts-expect-error Chrome-specific constraints
-        mandatory: {
-          chromeMediaSource: 'tab',
-          chromeMediaSourceId: this.streamId
-        }
-      },
-      video: false
-    });
+    // Get media stream using Chrome tab capture.
+    // If getUserMedia fails (e.g. the single-use streamId is already spent),
+    // begin()'s catch path runs the base cleanup only and never reaches
+    // onCleanup, so STOP_TAB_CAPTURE would never be sent and background would
+    // keep a dead active entry that wedges the next session. Send STOP here.
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: {
+          // @ts-expect-error Chrome-specific constraints
+          mandatory: {
+            chromeMediaSource: 'tab',
+            chromeMediaSourceId: this.streamId
+          }
+        },
+        video: false
+      });
+    } catch (error) {
+      await this.sendMessageToBackground({ type: 'STOP_TAB_CAPTURE', tabId: this.tabId });
+      throw error;
+    }
   }
 
   protected async onCleanup(): Promise<void> {

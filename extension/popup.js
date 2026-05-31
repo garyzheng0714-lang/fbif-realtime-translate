@@ -328,29 +328,8 @@ function showErrorState() {
 // Helper function to generate sites list HTML
 // CSP prohibits inline event handlers; hide icon directly when src is empty
 function generateSitesList() {
-  const renderedGroups = new Set();
   return ENABLED_SITES.map(site => {
     const info = SITE_INFO[site];
-    // If this site belongs to a group, render the group card once
-    if (info.group) {
-      if (renderedGroups.has(info.group)) return '';
-      renderedGroups.add(info.group);
-      const group = SITE_GROUPS[info.group];
-      const tooltipText = `Microsoft Teams\n${group.sites.map(s => s.domain).join('\n')}`;
-      const pills = group.sites.map(s =>
-        `<span class="site-group-pill" data-url="${s.domain}" title="${s.domain}">${s.label}</span>`
-      ).join('');
-      const groupImgStyle = group.icon ? '' : ' style="display:none"';
-      return `
-        <li class="site-item site-item-grouped" title="${tooltipText}">
-          <img src="${group.icon}" alt="${group.shortName}" class="site-icon"${groupImgStyle}>
-          <div class="site-info">
-            <div class="site-name">${group.shortName}</div>
-            <div class="site-group-pills">${pills}</div>
-          </div>
-        </li>
-      `;
-    }
     const tooltipText = `${info.name}\n${site}`;
     const imgStyle = info.icon ? '' : ' style="display:none"';
     return `

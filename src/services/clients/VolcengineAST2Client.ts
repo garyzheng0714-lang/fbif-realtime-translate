@@ -40,6 +40,7 @@ import { isElectron, isExtension } from '../../utils/environment';
 import {
   decodedOggOpusToInt16,
   type StreamingOggOpusDecoder,
+  type StreamingDecoderFactory,
   VolcengineAST2StreamingTTSDecoder,
 } from './VolcengineAST2StreamingTTSDecoder';
 // @ts-ignore - generated proto file
@@ -111,6 +112,86 @@ export function buildVolcengineAST2AuthHeaders(
   };
 }
 
+/**
+ * Decide how to finalize a TTS sentence, given the streaming decoder's state.
+ *
+ * This exists to prevent the same sentence audio from being played twice. The
+ * streaming decoder emits PCM chunk-by-chunk as it decodes; if a later chunk
+ * fails it flips to unavailable, but the chunks it already emitted have ALREADY
+ * been played. Blindly falling back to whole-sentence decode then replays the
+ * already-played prefix (audible echo / stutter). It must also be idempotent
+ * per sentence, because both TTSSentenceEnd and TTSEnded can fire for the same
+ * sentence and must not finalize it twice.
+ *
+ *  - 'skip'             : already finalized this sentence → do nothing.
+ *  - 'flush'            : streaming is live → flush the decoder's tail; the
+ *                         whole-sentence fallback is only needed if the flush
+ *                         yields no audio at all.
+ *  - 'whole-sentence'   : streaming never produced any audio for this sentence →
+ *                         decode the accumulated chunks as one blob.
+ */
+export type TTSFinishAction = 'skip' | 'flush' | 'whole-sentence';
+
+export function decideTTSFinishAction(state: {
+  alreadyFinalized: boolean;
+  streamingAvailable: boolean;
+  hasEmittedAudio: boolean;
+}): TTSFinishAction {
+  if (state.alreadyFinalized) return 'skip';
+  if (state.streamingAvailable) return 'flush';
+  // Decoder is unavailable (mid-sentence failure). If it already emitted audio,
+  // those chunks played — replaying the whole sentence would double them, so
+  // do NOT fall back. Only fall back when nothing streamed out at all.
+  if (state.hasEmittedAudio) return 'skip';
+  return 'whole-sentence';
+}
+
+/**
+ * Build the `requestMeta` for an outgoing TaskRequest (real audio frame or
+ * keepalive silence frame). Keeping a single builder ensures every audio frame
+ * carries the same metadata as StartSession (Endpoint + ResourceID), instead of
+ * the previous drift where StartSession had Endpoint/ResourceID but TaskRequests
+ * (real + silence) omitted them — a latent risk that frames get dropped if the
+ * server tightens requestMeta validation.
+ */
+export function buildTaskRequestMeta(args: {
+  resourceId: string;
+  connectionId: string;
+  sessionId: string;
+  sequence: number;
+  appKey?: string;
+}): Record<string, unknown> {
+  const meta: Record<string, unknown> = {
+    Endpoint: 'volc.service_type.10053',
+    ResourceID: args.resourceId,
+    ConnectionID: args.connectionId,
+    SessionID: args.sessionId,
+    Sequence: args.sequence,
+  };
+  if (args.appKey) meta.AppKey = args.appKey;
+  return meta;
+}
+
+/**
+ * High-frequency downlink event types: TTS audio chunks and per-character
+ * subtitle deltas. During one spoken sentence these can arrive dozens to
+ * hundreds of times. Building a fresh latency snapshot object for each one (and
+ * dispatching it) adds steady GC pressure over a multi-hour live session and
+ * competes with audio decode/playback for the main thread. Low-frequency
+ * lifecycle events (SessionStarted, sentence start/end) keep their full
+ * snapshot because they are the ones worth diagnosing.
+ */
+export function isHighFrequencyAST2Event(
+  eventType: number,
+  eventTypes: { TTSResponse: number; SourceSubtitleResponse: number; TranslationSubtitleResponse: number }
+): boolean {
+  return (
+    eventType === eventTypes.TTSResponse ||
+    eventType === eventTypes.SourceSubtitleResponse ||
+    eventType === eventTypes.TranslationSubtitleResponse
+  );
+}
+
 export interface VolcengineAST2LatencyState {
   sessionStartedAt?: number;
   lastInputAudioSentAt?: number;
@@ -164,9 +245,30 @@ export class VolcengineAST2Client implements IClient {
   private lastResponseSequence: number = -1;
   private ttsSentenceTargetItemId: string | null = null;
 
+  // Explicit per-sentence finalize flag so TTSSentenceEnd and TTSEnded can't
+  // each finalize (and re-play) the same sentence. Reset on TTSSentenceStart.
+  private ttsSentenceFinalized = false;
+
   // Keepalive: send silent audio frames when mic is muted to prevent server timeout
   private keepaliveInterval: ReturnType<typeof setInterval> | null = null;
   private lastAudioSentTime: number = 0;
+
+  // Reconnection: Volcengine AST2 hard-limits a connection (2h cap, 30min
+  // silence, 45000081 push timeout). Long videos/live streams hit these
+  // routinely, so we transparently rebuild the socket + StartSession instead of
+  // tearing the user's session down.
+  private isDisconnecting = false;        // true while a user-initiated disconnect is in flight
+  private sessionEverStarted = false;     // true once the current socket reached SessionStarted
+  private reconnectAttempts = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private preReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private isReconnecting = false;
+  private static readonly MAX_RECONNECT_ATTEMPTS = 6;
+  private static readonly RECONNECT_BASE_DELAY_MS = 1000;
+  private static readonly RECONNECT_MAX_DELAY_MS = 15000;
+  // Pre-reconnect well before the 2h hard cap so a fresh connection is live
+  // before the server force-closes the old one (avoids a downlink gap).
+  private static readonly PRE_RECONNECT_AFTER_MS = 110 * 60 * 1000;
 
   // Latency diagnostics: only timestamps, never audio payloads
   private sessionStartedAt: number = 0;
@@ -177,10 +279,22 @@ export class VolcengineAST2Client implements IClient {
   // Whether we registered WebSocket headers that need cleanup (Electron/Extension)
   private headersRegistered = false;
 
-  constructor(appId: string, accessToken: string, resourceId: string = 'volc.service_type.10053') {
+  // Optional override for the low-level Ogg Opus decoder factory. Production
+  // leaves this undefined and lazily imports `ogg-opus-decoder`; tests inject a
+  // controllable fake to exercise streaming-failure / fallback paths without a
+  // real WASM decoder. Kept optional so existing call sites stay unchanged.
+  private streamingDecoderFactoryOverride?: StreamingDecoderFactory;
+
+  constructor(
+    appId: string,
+    accessToken: string,
+    resourceId: string = 'volc.service_type.10053',
+    streamingDecoderFactoryOverride?: StreamingDecoderFactory
+  ) {
     this.appId = appId;
     this.accessToken = accessToken;
     this.resourceId = resourceId;
+    this.streamingDecoderFactoryOverride = streamingDecoderFactoryOverride;
   }
 
   private isLegacyAuth(): boolean {
@@ -198,6 +312,17 @@ export class VolcengineAST2Client implements IClient {
 
   private generateItemId(prefix: string): string {
     return `volcengine_ast2_${prefix}_${++this.itemCounter}`;
+  }
+
+  /** requestMeta for an outgoing TaskRequest, aligned with StartSession. */
+  private taskRequestMeta(): Record<string, unknown> {
+    return buildTaskRequestMeta({
+      resourceId: this.resourceId,
+      connectionId: this.connectionId,
+      sessionId: this.sessionId,
+      sequence: this.sequence++,
+      appKey: this.isLegacyAuth() ? this.appId : undefined,
+    });
   }
 
   private sendData(data: Uint8Array): void {
@@ -225,7 +350,21 @@ export class VolcengineAST2Client implements IClient {
     this.lastInputAudioSentAt = 0;
     this.ttsSentenceStartedAt = 0;
     this.firstTtsChunkReceivedAt = 0;
+    this.isDisconnecting = false;
+    this.sessionEverStarted = false;
+    this.reconnectAttempts = 0;
+    this.clearReconnectTimers();
 
+    return this.openTransport();
+  }
+
+  /**
+   * Open the WebSocket transport for the current platform, injecting auth
+   * headers as needed. Shared by the initial connect() and by reconnection,
+   * so a reconnect rebuilds the socket through the exact same path (including
+   * header injection) without re-running connect()'s state reset.
+   */
+  private openTransport(): Promise<void> {
     if (isElectron() && window.electron?.invoke) {
       return this.connectViaElectronHeaderInjection();
     }
@@ -362,6 +501,21 @@ export class VolcengineAST2Client implements IClient {
           clearTimeout(connectionTimer);
           console.log('[VolcengineAST2Client] WebSocket closed:', event.code, event.reason);
           this.isConnectedState = false;
+          this.stopKeepalive();
+
+          const closedBeforeSessionStarted = this.sessionStartedReject != null;
+
+          // If the socket closes before SessionStarted, the pending connect (or
+          // reconnect) promise is still waiting. Reject it now instead of letting
+          // it hang until the 30s connection timeout — browser auth/rate-limit/
+          // capacity rejections after the upgrade arrive as onclose (not
+          // onerror), so without this the user is stuck on "initializing" 30s.
+          if (this.sessionStartedReject) {
+            const reject = this.sessionStartedReject;
+            this.sessionStartedResolve = null;
+            this.sessionStartedReject = null;
+            reject(new Error(`WS closed before session started: ${event.code} ${event.reason}`));
+          }
 
           this.eventHandlers.onRealtimeEvent?.({
             source: 'client',
@@ -376,6 +530,21 @@ export class VolcengineAST2Client implements IClient {
               }
             }
           });
+
+          // A close while a reconnect handshake is in flight is handled by the
+          // reconnect loop's rejected promise — don't tear the session down.
+          if (this.isReconnecting) {
+            return;
+          }
+
+          // An established session that closed unexpectedly (server hard cap,
+          // silence timeout, push timeout, network blip) should be transparently
+          // reconnected rather than torn down. Suppress onClose so MainPanel
+          // keeps the session alive while we rebuild the connection.
+          if (!this.isDisconnecting && this.sessionEverStarted && !closedBeforeSessionStarted) {
+            this.scheduleReconnect();
+            return;
+          }
 
           this.eventHandlers.onClose?.(event);
         };
@@ -490,6 +659,10 @@ export class VolcengineAST2Client implements IClient {
         this.firstTtsChunkReceivedAt = receivedAt;
       }
 
+      // Only build the (allocating) latency snapshot for low-frequency events.
+      // High-frequency TTS/subtitle deltas skip it to avoid per-message GC churn
+      // over long live sessions.
+      const includeLatency = !isHighFrequencyAST2Event(eventType, EventType);
       this.eventHandlers.onRealtimeEvent?.({
         source: 'server',
         event: {
@@ -502,16 +675,20 @@ export class VolcengineAST2Client implements IClient {
             audioDataLength: response.data?.length || 0,
             sessionId: response.responseMeta?.SessionID,
             statusCode: response.responseMeta?.StatusCode,
-            latency: buildVolcengineAST2LatencySnapshot(
-              {
-                sessionStartedAt: this.sessionStartedAt,
-                lastInputAudioSentAt: this.lastInputAudioSentAt,
-                ttsSentenceStartedAt: this.ttsSentenceStartedAt,
-                firstTtsChunkReceivedAt: this.firstTtsChunkReceivedAt,
-              },
-              receivedAt,
-              { startTime: response.startTime, endTime: response.endTime }
-            ),
+            ...(includeLatency
+              ? {
+                  latency: buildVolcengineAST2LatencySnapshot(
+                    {
+                      sessionStartedAt: this.sessionStartedAt,
+                      lastInputAudioSentAt: this.lastInputAudioSentAt,
+                      ttsSentenceStartedAt: this.ttsSentenceStartedAt,
+                      firstTtsChunkReceivedAt: this.firstTtsChunkReceivedAt,
+                    },
+                    receivedAt,
+                    { startTime: response.startTime, endTime: response.endTime }
+                  ),
+                }
+              : {}),
           }
         }
       });
@@ -607,6 +784,7 @@ export class VolcengineAST2Client implements IClient {
         case EventType.TTSSentenceStart:
           if (!this.currentConfig?.textOnly) {
             this.ttsChunks = [];
+            this.ttsSentenceFinalized = false;
             // Lock the current translation item — TTS audio should associate with the
             // translation active when TTS starts, not when it ends
             this.ttsSentenceTargetItemId = this.currentTranslationItemId || this.lastCompletedTranslationItemId;
@@ -617,8 +795,10 @@ export class VolcengineAST2Client implements IClient {
           if (!this.currentConfig?.textOnly) this.finishStreamingOrDecodeTTSAndPlay();
           break;
         case EventType.TTSEnded:
-          // Flush any remaining chunks
-          if (!this.currentConfig?.textOnly && this.ttsChunks.length > 0) {
+          // Finalize the sentence if TTSSentenceEnd hasn't already. Gate on the
+          // explicit finalize flag rather than ttsChunks length so an in-flight
+          // (async) TTSSentenceEnd can't be double-finalized by TTSEnded.
+          if (!this.currentConfig?.textOnly && !this.ttsSentenceFinalized) {
             this.finishStreamingOrDecodeTTSAndPlay();
           }
           break;
@@ -642,8 +822,14 @@ export class VolcengineAST2Client implements IClient {
 
   private startKeepalive(): void {
     this.stopKeepalive();
-    const KEEPALIVE_INTERVAL_MS = 80;   // Send every 80ms — matches silence frame duration for 1x real-time audio rate
-    const SILENCE_TIMEOUT_MS = 60;      // Trigger quickly (< interval, so first tick always sends)
+    const KEEPALIVE_INTERVAL_MS = 100;  // How often to check for a silence gap
+    // Only treat the input as genuinely silent after a gap well beyond the real
+    // audio frame cadence (~170ms per 4096-sample frame). The old 60ms threshold
+    // fired BETWEEN consecutive real frames, splicing silence into live speech
+    // and corrupting the server's VAD sentence boundaries (fragmented subtitles,
+    // stuttering dubbing). Keepalive is a fallback for true silence only, so the
+    // threshold must sit clearly above any real-frame interval.
+    const SILENCE_TIMEOUT_MS = 300;
     // 1280 samples = 80ms of 16kHz silence — matches Volcengine recommended packet size ("建议80ms 一包")
     const SILENCE_FRAME = new Uint8Array(2560); // 1280 Int16 samples = 2560 bytes of zeros
 
@@ -651,11 +837,7 @@ export class VolcengineAST2Client implements IClient {
       if (!this.isConnectedState) return;
       if (Date.now() - this.lastAudioSentTime > SILENCE_TIMEOUT_MS) {
         const request = TranslateRequest.encode({
-          requestMeta: {
-            SessionID: this.sessionId,
-            ConnectionID: this.connectionId,
-            Sequence: this.sequence++,
-          },
+          requestMeta: this.taskRequestMeta(),
           event: EventType.TaskRequest,
           sourceAudio: {
             binaryData: SILENCE_FRAME,
@@ -677,12 +859,106 @@ export class VolcengineAST2Client implements IClient {
   private handleSessionStarted(): void {
     console.log('[VolcengineAST2Client] Session started successfully');
     this.sessionStartedAt = Date.now();
+    this.sessionEverStarted = true;
+    this.reconnectAttempts = 0;
     this.startKeepalive();
+    this.schedulePreReconnect();
 
     if (this.sessionStartedResolve) {
       this.sessionStartedResolve();
       this.sessionStartedResolve = null;
       this.sessionStartedReject = null;
+    }
+  }
+
+  // ─── Reconnection ──────────────────────────────────────────────────
+  private clearReconnectTimers(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.preReconnectTimer) {
+      clearTimeout(this.preReconnectTimer);
+      this.preReconnectTimer = null;
+    }
+  }
+
+  /**
+   * Arm a timer that proactively rebuilds the connection before Volcengine's
+   * 2h hard cap force-closes it, so the downlink never gaps on the limit.
+   */
+  private schedulePreReconnect(): void {
+    if (this.preReconnectTimer) clearTimeout(this.preReconnectTimer);
+    this.preReconnectTimer = setTimeout(() => {
+      this.preReconnectTimer = null;
+      if (this.isDisconnecting || this.isReconnecting) return;
+      console.log('[VolcengineAST2Client] Pre-reconnecting before 2h hard cap');
+      this.reconnectAttempts = 0;
+      this.reconnect();
+    }, VolcengineAST2Client.PRE_RECONNECT_AFTER_MS);
+  }
+
+  /** Schedule a reconnect attempt with exponential backoff. */
+  private scheduleReconnect(): void {
+    if (this.isDisconnecting || this.isReconnecting) return;
+    this.clearReconnectTimers();
+
+    if (this.reconnectAttempts >= VolcengineAST2Client.MAX_RECONNECT_ATTEMPTS) {
+      console.error('[VolcengineAST2Client] Reconnect attempts exhausted, giving up');
+      this.eventHandlers.onClose?.({ code: 1006, reason: 'reconnect_failed' });
+      return;
+    }
+
+    const delay = Math.min(
+      VolcengineAST2Client.RECONNECT_BASE_DELAY_MS * 2 ** this.reconnectAttempts,
+      VolcengineAST2Client.RECONNECT_MAX_DELAY_MS
+    );
+    // Signal "reconnecting" once on entry (not on every backoff retry) so the
+    // UI shows a single reconnecting state for the whole recovery window.
+    if (this.reconnectAttempts === 0) {
+      this.eventHandlers.onReconnecting?.();
+    }
+    this.reconnectAttempts++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnect();
+    }, delay);
+  }
+
+  /**
+   * Rebuild the WebSocket + StartSession and wait for SessionStarted. Uses a
+   * fresh ConnectionID/SessionID (Volcengine rejects reused connection IDs and
+   * validates SessionID on every downlink message). On success, conversation
+   * state and accumulated audio are preserved; on failure, falls back to
+   * exponential-backoff retries.
+   */
+  private async reconnect(): Promise<void> {
+    if (this.isDisconnecting) return;
+    this.isReconnecting = true;
+    this.clearReconnectTimers();
+
+    // Tear down any lingering socket from the dead connection.
+    if (this.websocket) {
+      try { this.websocket.close(); } catch { /* ignore */ }
+      this.websocket = null;
+    }
+
+    // Fresh identifiers for the new connection.
+    this.connectionId = uuidv4();
+    this.sessionId = uuidv4();
+    this.sequence = 0;
+    this.sessionEverStarted = false;
+
+    try {
+      await this.openTransport();
+      // Reached SessionStarted — connection is live again.
+      this.isReconnecting = false;
+      this.reconnectAttempts = 0;
+      this.eventHandlers.onReconnected?.();
+    } catch (error) {
+      console.warn('[VolcengineAST2Client] Reconnect attempt failed:', error);
+      this.isReconnecting = false;
+      this.scheduleReconnect();
     }
   }
 
@@ -839,7 +1115,26 @@ export class VolcengineAST2Client implements IClient {
 
   private async finishStreamingOrDecodeTTSAndPlay(): Promise<void> {
     const streamingDecoder = this.streamingTTSDecoder;
-    if (streamingDecoder?.isAvailable()) {
+    const action = decideTTSFinishAction({
+      alreadyFinalized: this.ttsSentenceFinalized,
+      streamingAvailable: !!streamingDecoder?.isAvailable(),
+      hasEmittedAudio: !!streamingDecoder?.hasEmittedAudio(),
+    });
+
+    if (action === 'skip') {
+      // Either already finalized (dedup), or streaming already played part of
+      // this sentence and then failed — replaying the whole sentence would
+      // double the audio, so drop the buffered chunks instead.
+      this.ttsSentenceFinalized = true;
+      this.ttsChunks = [];
+      this.ttsSentenceTargetItemId = null;
+      return;
+    }
+
+    // From here on this sentence is being finalized exactly once.
+    this.ttsSentenceFinalized = true;
+
+    if (action === 'flush' && streamingDecoder) {
       await streamingDecoder.finishSentence();
       if (streamingDecoder.hasEmittedAudio()) {
         this.ttsChunks = [];
@@ -847,19 +1142,21 @@ export class VolcengineAST2Client implements IClient {
         return;
       }
     }
+    // 'whole-sentence', or a flush that produced nothing → decode the blob.
     await this.decodeTTSAndPlay();
   }
 
   private getStreamingTTSDecoder(): VolcengineAST2StreamingTTSDecoder {
     if (!this.streamingTTSDecoder) {
+      const factory: StreamingDecoderFactory = this.streamingDecoderFactoryOverride ?? (async () => {
+        const { OggOpusDecoder } = await import('ogg-opus-decoder');
+        return new OggOpusDecoder({
+          sampleRate: OUTPUT_SAMPLE_RATE,
+          speechQualityEnhancement: 'none',
+        } as any) as StreamingOggOpusDecoder;
+      });
       this.streamingTTSDecoder = new VolcengineAST2StreamingTTSDecoder(
-        async () => {
-          const { OggOpusDecoder } = await import('ogg-opus-decoder');
-          return new OggOpusDecoder({
-            sampleRate: OUTPUT_SAMPLE_RATE,
-            speechQualityEnhancement: 'none',
-          } as any) as StreamingOggOpusDecoder;
-        },
+        factory,
         (audio, meta) => {
           this.emitDecodedTTSAudio({
             audio,
@@ -960,6 +1257,10 @@ export class VolcengineAST2Client implements IClient {
   }
 
   async disconnect(): Promise<void> {
+    // Mark intent FIRST so the socket's onclose treats this as a user-initiated
+    // stop and does not kick off a reconnect.
+    this.isDisconnecting = true;
+    this.clearReconnectTimers();
     this.stopKeepalive();
     // Send FinishSession before closing
     try {
@@ -1027,6 +1328,10 @@ export class VolcengineAST2Client implements IClient {
 
   reset(): void {
     this.stopKeepalive();
+    this.clearReconnectTimers();
+    this.isReconnecting = false;
+    this.reconnectAttempts = 0;
+    this.sessionEverStarted = false;
     this.conversationItems = [];
     this.sequence = 0;
     this.currentSourceItemId = null;
@@ -1054,11 +1359,7 @@ export class VolcengineAST2Client implements IClient {
     const rawBytes = new Uint8Array(downsampled.buffer, downsampled.byteOffset, downsampled.byteLength);
 
     const request = TranslateRequest.encode({
-      requestMeta: {
-        SessionID: this.sessionId,
-        ConnectionID: this.connectionId,
-        Sequence: this.sequence++,
-      },
+      requestMeta: this.taskRequestMeta(),
       event: EventType.TaskRequest,
       sourceAudio: {
         binaryData: rawBytes,

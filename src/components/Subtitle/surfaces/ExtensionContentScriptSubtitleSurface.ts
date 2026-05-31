@@ -22,6 +22,48 @@ function isSupportedUrl(url: string | undefined): boolean {
  */
 export const CONTENT_SCRIPT_UNAVAILABLE = 'CONTENT_SCRIPT_UNAVAILABLE';
 
+/**
+ * The slice of settings the subtitle iframe needs: provider plus its
+ * language pair and turn-detection mode. The language pair lives inside a
+ * provider-specific sub-object, so it is resolved via the store's own
+ * getCurrentProviderSettings() helper rather than read off a fixed key.
+ */
+export interface SubtitleConfig {
+  provider: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  turnDetectionMode: string | undefined;
+}
+
+interface SettingsConfigSource {
+  provider: unknown;
+  getCurrentProviderSettings: () => unknown;
+}
+
+export function selectSubtitleConfig(state: SettingsConfigSource): SubtitleConfig {
+  const ps = state.getCurrentProviderSettings();
+  const langs = ps as { sourceLanguage?: string; targetLanguage?: string } | null | undefined;
+  const turnDetectionMode =
+    ps && typeof ps === 'object' && 'turnDetectionMode' in ps
+      ? (ps as { turnDetectionMode?: string }).turnDetectionMode
+      : undefined;
+  return {
+    provider: state.provider as string,
+    sourceLanguage: langs?.sourceLanguage ?? 'en',
+    targetLanguage: langs?.targetLanguage ?? 'zh',
+    turnDetectionMode,
+  };
+}
+
+export function areSubtitleConfigsEqual(a: SubtitleConfig, b: SubtitleConfig): boolean {
+  return (
+    a.provider === b.provider &&
+    a.sourceLanguage === b.sourceLanguage &&
+    a.targetLanguage === b.targetLanguage &&
+    a.turnDetectionMode === b.turnDetectionMode
+  );
+}
+
 export function sanitizeSubtitlePortItems(items: any[] = []): any[] {
   return items
     .map((item) => {
@@ -182,24 +224,7 @@ export class ExtensionContentScriptSubtitleSurface implements SubtitleSurface {
     // resolve to the user's real values inside the iframe.
     const session = useSessionStore.getState();
     const settings = useSettingsStore.getState();
-    const providerSettings = settings.getCurrentProviderSettings();
-    const langs = providerSettings as
-      | { sourceLanguage?: string; targetLanguage?: string }
-      | null
-      | undefined;
-    const turnDetectionMode =
-      providerSettings && 'turnDetectionMode' in providerSettings
-        ? (providerSettings as { turnDetectionMode?: string }).turnDetectionMode
-        : undefined;
-
-    // Track last-emitted config so we can dedupe and avoid spamming the port
-    // on every unrelated settings-store change.
-    let lastConfig = {
-      provider: settings.provider as string,
-      sourceLanguage: langs?.sourceLanguage ?? 'en',
-      targetLanguage: langs?.targetLanguage ?? 'zh',
-      turnDetectionMode,
-    };
+    const initialConfig = selectSubtitleConfig(settings);
 
     const playbackSnapshot = getWirePlaybackSnapshot();
 
@@ -210,10 +235,10 @@ export class ExtensionContentScriptSubtitleSurface implements SubtitleSurface {
         systemAudioItems: sanitizeSubtitlePortItems(session.systemAudioItems),
         isSessionActive: session.isSessionActive,
         sessionStartTime: session.sessionStartTime,
-        provider: lastConfig.provider,
-        sourceLanguage: lastConfig.sourceLanguage,
-        targetLanguage: lastConfig.targetLanguage,
-        turnDetectionMode: lastConfig.turnDetectionMode,
+        provider: initialConfig.provider,
+        sourceLanguage: initialConfig.sourceLanguage,
+        targetLanguage: initialConfig.targetLanguage,
+        turnDetectionMode: initialConfig.turnDetectionMode,
         playback: playbackSnapshot,
       },
     });
@@ -250,36 +275,18 @@ export class ExtensionContentScriptSubtitleSurface implements SubtitleSurface {
     );
 
     // Forward provider + language pair + turn detection mode whenever they
-    // change in the side panel. We listen to the full state (rather than a
-    // narrow selector) because the language pair lives inside a
-    // provider-specific sub-object that varies by provider, so dedupe in the
-    // callback against `lastConfig`.
-    const pushConfigIfChanged = () => {
-      if (!this.port) return;
-      const s = useSettingsStore.getState();
-      const ps = s.getCurrentProviderSettings();
-      const l = ps as { sourceLanguage?: string; targetLanguage?: string } | null | undefined;
-      const tdm = ps && 'turnDetectionMode' in ps
-        ? (ps as { turnDetectionMode?: string }).turnDetectionMode
-        : undefined;
-      const next = {
-        provider: s.provider as string,
-        sourceLanguage: l?.sourceLanguage ?? 'en',
-        targetLanguage: l?.targetLanguage ?? 'zh',
-        turnDetectionMode: tdm,
-      };
-      if (
-        next.provider === lastConfig.provider &&
-        next.sourceLanguage === lastConfig.sourceLanguage &&
-        next.targetLanguage === lastConfig.targetLanguage &&
-        next.turnDetectionMode === lastConfig.turnDetectionMode
-      ) {
-        return;
-      }
-      lastConfig = next;
-      this.port.postMessage({ type: 'config', ...next });
-    };
-    const unsubConfig = useSettingsStore.subscribe(pushConfigIfChanged);
+    // change in the side panel. Subscribe WITH a selector + equality function
+    // so the comparison happens before the callback runs: unrelated settings
+    // writes (volume, noise reduction, persisted echoes) short-circuit at the
+    // selector and never wake this surface, instead of re-running a full
+    // dedupe callback on every store write.
+    const unsubConfig = useSettingsStore.subscribe(
+      selectSubtitleConfig,
+      (next) => {
+        this.port?.postMessage({ type: 'config', ...next });
+      },
+      { equalityFn: areSubtitleConfigsEqual },
+    );
 
     const unsubPlayback = subscribePlaybackForPort((encoded) => {
       this.port?.postMessage({ type: 'playback', ...encoded });

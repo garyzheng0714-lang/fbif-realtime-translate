@@ -135,6 +135,15 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   try {
     const url = new URL(tab.url);
 
+    // A real URL navigation invalidates any in-flight tabCapture streamId for
+    // this tab, so drop the stale capture entry. Otherwise the Map keeps an
+    // entry referencing a dead stream. Only act on actual URL changes, not on
+    // plain `status: 'complete'` ticks, to avoid clearing a live capture.
+    if (changeInfo.url && activeTabCaptures.has(tabId)) {
+      activeTabCaptures.delete(tabId);
+      console.debug('[Sokuji] [Background] Cleaned up tab capture due to navigation:', tabId);
+    }
+
     // Check if the current site is in the enabled sites list
     const isEnabledSite = ENABLED_SITES.some(site =>
       url.hostname === site || url.hostname.endsWith('.' + site));
@@ -189,11 +198,13 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
       await chrome.action.setPopup({ tabId: tabId, popup: '' });
       console.debug('[Sokuji] [Background] Maintaining side panel (onClicked mode) for supported site:', url.hostname);
     } else {
-      // Reset the GLOBAL default to disabled so any currently-open side panel
-      // actually closes when the user switches to an unsupported tab. Per-tab
-      // `enabled: false` alone does not reliably hide a panel that is already
-      // visible in the window.
+      // Disable the side panel for THIS tab only. A global setOptions without a
+      // tabId mutates the default for every tab lacking an explicit per-tab
+      // option, which races with the per-tab enabled:true set for supported
+      // tabs and can blank out a panel that should be visible during fast tab
+      // switching. Scope the disable to the activated tabId instead.
       await chrome.sidePanel.setOptions({
+        tabId: tabId,
         enabled: false,
       });
       await chrome.action.setPopup({ tabId: tabId, popup: 'popup.html' });
@@ -618,13 +629,12 @@ async function handleStartTabCapture(tabId) {
       return { success: false, error: 'Tab ID is required' };
     }
 
-    // Check if already capturing this tab
+    // Never reuse a cached streamId: chrome.tabCapture.getMediaStreamId returns
+    // a single-use id that is invalidated once the frontend getUserMedia call
+    // consumes it. A repeat START always mints a fresh id; drop any stale entry
+    // for this tab first so the Map reflects only the current live capture.
     if (activeTabCaptures.has(tabId)) {
-      const existing = activeTabCaptures.get(tabId);
-      if (existing.active) {
-        console.info('[Sokuji] [Background] Tab already being captured, returning existing streamId');
-        return { success: true, streamId: existing.streamId };
-      }
+      activeTabCaptures.delete(tabId);
     }
 
     // Verify the tab exists

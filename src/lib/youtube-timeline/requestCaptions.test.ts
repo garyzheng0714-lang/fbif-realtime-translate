@@ -111,6 +111,25 @@ describe('requestCaptions', () => {
     });
   });
 
+  // WHY: the content script contract is strictly { ok: true, payload } or { ok: false,
+  // error }. A malformed response that lacks an explicit ok (e.g. a stale/partial reply)
+  // used to slip past the success/ok "or" check and then fall into the dead json3
+  // fallback branch, which parsed the whole envelope as captions and surfaced a
+  // misleading caption_parse_failed. Treat anything that is not ok:true as a fetch error
+  // so the tick retries against the real failure.
+  it('treats a response without an explicit ok flag as a fetch failure', async () => {
+    installChromeMock({
+      payload: {
+        videoId: 'video-123',
+        json3: { events: [{ tStartMs: 0, segs: [{ utf8: 'Ghost' }] }] },
+      },
+    });
+
+    await expect(requestCaptions()).rejects.toMatchObject({
+      code: 'caption_fetch_failed',
+    });
+  });
+
   it('injects the timeline content script and retries when an existing YouTube tab has no fresh receiver', async () => {
     const successResponse = {
       ok: true,
@@ -203,6 +222,44 @@ describe('requestCaptions', () => {
       durationMs: 60000,
       paused: false,
       videoId: 'video-123',
+    });
+  });
+
+  // WHY: a video element that has not loaded yet reports NaN for currentTime, and
+  // typeof NaN === 'number' so the old check let it through. A NaN currentTimeMs then
+  // poisons the whole tick: seek detection (Math.abs(now - last) > threshold) is always
+  // false and getCueWindow's startMs <= NaN + prebuffer is always false, so the user
+  // sees "connected but no subtitles and no audio". Reject non-finite/negative times so
+  // tick retries instead of advancing on a poisoned clock.
+  it('rejects a non-finite current time so the tick clock is never poisoned', async () => {
+    installChromeMock({
+      ok: true,
+      payload: {
+        currentTimeMs: Number.NaN,
+        durationMs: 60000,
+        paused: false,
+        videoId: 'video-123',
+      },
+    });
+
+    await expect(requestYouTubeVideoTimeFromActiveTab()).rejects.toMatchObject({
+      code: 'caption_fetch_failed',
+    });
+  });
+
+  it('rejects a negative current time instead of advancing the schedule backwards', async () => {
+    installChromeMock({
+      ok: true,
+      payload: {
+        currentTimeMs: -1,
+        durationMs: 60000,
+        paused: false,
+        videoId: 'video-123',
+      },
+    });
+
+    await expect(requestYouTubeVideoTimeFromActiveTab()).rejects.toMatchObject({
+      code: 'caption_fetch_failed',
     });
   });
 

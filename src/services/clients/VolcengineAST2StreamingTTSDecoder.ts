@@ -54,10 +54,15 @@ export class VolcengineAST2StreamingTTSDecoder {
   }
 
   async startSentence(): Promise<void> {
-    this.available = true;
-    this.emittedAudio = false;
-    this.operationQueue = Promise.resolve();
+    // Chain the reset onto the existing operationQueue instead of discarding it,
+    // so the previous sentence's decode/flush against the shared decoder fully
+    // completes before this sentence resets that same decoder. Resetting the
+    // availability flags inside the serial chain keeps them ordered relative to
+    // the previous sentence's last emit, avoiding a state race on the shared
+    // WASM decoder that would clip the previous sentence's tail audio.
     await this.enqueue(async () => {
+      this.available = true;
+      this.emittedAudio = false;
       const decoder = await this.getDecoder();
       await decoder.reset?.();
     });

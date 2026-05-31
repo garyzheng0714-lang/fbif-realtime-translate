@@ -52,7 +52,11 @@
     else if (msg?.type === 'subtitle:exit') unmountHost();
   });
 
-  window.addEventListener('message', (event) => {
+  // These viewport / fullscreen listeners are only meaningful while the overlay
+  // is mounted. Registering them on mount and removing them on unmount keeps the
+  // pair symmetric so repeated enter/exit cycles do not leak listeners that keep
+  // firing against a torn-down overlay.
+  function onWindowMessage(event) {
     if (!iframeEl || event.source !== iframeEl.contentWindow) return;
     const data = event.data;
     if (!data || typeof data !== 'object') return;
@@ -63,15 +67,27 @@
       // with no working dismiss button. Tear the host down.
       unmountHost();
     }
-  });
+  }
 
-  window.addEventListener('resize', () => {
+  function onWindowResize() {
     if (!iframeEl || dragOverlay) return;
     // Re-clamp on viewport change (e.g., user resized the browser window).
     const rect = iframeEl.getBoundingClientRect();
     const lt = clampLT(rect.left, rect.top, rect.width, rect.height);
     applyLT(lt.left, lt.top);
-  });
+  }
+
+  // The browser renders only the fullscreen element and its descendants in the
+  // top layer. A host under document.body — a sibling of the fullscreen element
+  // — is occluded regardless of z-index, so the subtitle overlay vanishes in the
+  // most common viewing posture. Re-parent the host into the fullscreen element
+  // while fullscreen is active and move it back to document.body on exit.
+  function onFullscreenChange() {
+    if (!host) return;
+    const target = document.fullscreenElement || document.body;
+    if (host.parentNode === target) return;
+    target.appendChild(host);
+  }
 
   function mountHost() {
     if (host) return;
@@ -110,12 +126,21 @@
       'color-scheme: dark',
     ].join(';');
     shadow.appendChild(iframeEl);
-    document.body.appendChild(host);
+    // Mount into the fullscreen element if YouTube is already fullscreen so the
+    // overlay is visible from the start, not just after the next toggle.
+    (document.fullscreenElement || document.body).appendChild(host);
+
+    window.addEventListener('message', onWindowMessage);
+    window.addEventListener('resize', onWindowResize);
+    document.addEventListener('fullscreenchange', onFullscreenChange);
   }
 
   function unmountHost() {
     cleanupDragOverlay();
     if (!host) return;
+    window.removeEventListener('message', onWindowMessage);
+    window.removeEventListener('resize', onWindowResize);
+    document.removeEventListener('fullscreenchange', onFullscreenChange);
     host.remove();
     host = null;
     iframeEl = null;

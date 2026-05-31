@@ -5,6 +5,12 @@ export interface TimelineTtsChunk {
   sampleRate: number;
 }
 
+// Each TtsEngine holds one edge-tts WebSocket with a physical single-flight lock, so
+// throughput per engine is one clip at a time. A small pool of independent engines lets
+// several short cues synthesize in parallel, which is what keeps dubbing prebuffer from
+// falling behind playback. Two to four engines balances parallelism against socket cost.
+const TTS_POOL_SIZE = 3;
+
 function floatToInt16(samples: Float32Array): Int16Array {
   const output = new Int16Array(samples.length);
 
@@ -18,15 +24,28 @@ function floatToInt16(samples: Float32Array): Int16Array {
   return output;
 }
 
+interface TtsSlot {
+  engine: TtsEngine | null;
+  initPromise: Promise<void> | null;
+  // Serial queue inside a single engine so two cues never trip the engine's
+  // single-flight lock; the pool provides cross-slot parallelism.
+  queue: Promise<void>;
+  // Number of cues queued or running on this slot, used to pick the least-busy slot.
+  pending: number;
+}
+
 export class TimelineTts {
-  private engine: TtsEngine | null = null;
-  private initPromise: Promise<void> | null = null;
-  private queue: Promise<void> = Promise.resolve();
+  private slots: TtsSlot[] = Array.from({ length: TTS_POOL_SIZE }, () => ({
+    engine: null,
+    initPromise: null,
+    queue: Promise.resolve(),
+    pending: 0,
+  }));
   private generation = 0;
   private disposeRejectors = new Set<(error: Error) => void>();
 
   initialize(): Promise<void> {
-    return this.initializeForGeneration(this.generation);
+    return this.initializeSlotForGeneration(this.slots[0], this.generation);
   }
 
   private createDisposedError(): Error {
@@ -70,32 +89,32 @@ export class TimelineTts {
     });
   }
 
-  private initializeForGeneration(generation: number): Promise<void> {
+  private initializeSlotForGeneration(slot: TtsSlot, generation: number): Promise<void> {
     if (generation !== this.generation) {
       return Promise.reject(this.createDisposedError());
     }
 
-    if (this.initPromise) {
-      return this.withDisposeGuard(this.initPromise, generation);
+    if (slot.initPromise) {
+      return this.withDisposeGuard(slot.initPromise, generation);
     }
 
     const engine = new TtsEngine();
-    this.engine = engine;
-    this.initPromise = engine.init('edge-tts')
+    slot.engine = engine;
+    slot.initPromise = engine.init('edge-tts')
       .then(() => {
-        if (this.engine !== engine || generation !== this.generation) {
+        if (slot.engine !== engine || generation !== this.generation) {
           throw this.createDisposedError();
         }
       })
       .catch((error) => {
-        if (this.engine === engine && generation === this.generation) {
-          this.engine = null;
-          this.initPromise = null;
+        if (slot.engine === engine && generation === this.generation) {
+          slot.engine = null;
+          slot.initPromise = null;
         }
         throw error;
       });
 
-    return this.withDisposeGuard(this.initPromise, generation);
+    return this.withDisposeGuard(slot.initPromise, generation);
   }
 
   generateChinese(
@@ -103,13 +122,23 @@ export class TimelineTts {
     onChunk: (chunk: TimelineTtsChunk) => void,
   ): Promise<void> {
     const generation = this.generation;
-    const run = () => this.generateChineseForGeneration(text, onChunk, generation);
-    const result = this.queue.then(run, run);
-    this.queue = result.catch(() => undefined);
-    return result;
+    // Dispatch to the least-busy slot so dense windows fan out across the pool while a
+    // single engine still serializes its own cues.
+    const slot = this.slots.reduce((least, candidate) => (
+      candidate.pending < least.pending ? candidate : least
+    ), this.slots[0]);
+
+    slot.pending += 1;
+    const run = () => this.generateChineseForGeneration(slot, text, onChunk, generation);
+    const result = slot.queue.then(run, run);
+    slot.queue = result.catch(() => undefined);
+    return result.finally(() => {
+      slot.pending -= 1;
+    });
   }
 
   private async generateChineseForGeneration(
+    slot: TtsSlot,
     text: string,
     onChunk: (chunk: TimelineTtsChunk) => void,
     generation: number,
@@ -118,12 +147,12 @@ export class TimelineTts {
       throw this.createDisposedError();
     }
 
-    await this.initializeForGeneration(generation);
-    if (!this.engine) {
+    await this.initializeSlotForGeneration(slot, generation);
+    if (!slot.engine) {
       throw new Error('Timeline TTS engine not initialized');
     }
 
-    const engine = this.engine;
+    const engine = slot.engine;
     await this.withDisposeGuard(
       engine.generateStream(
         text,
@@ -151,11 +180,14 @@ export class TimelineTts {
     }
     this.disposeRejectors.clear();
 
-    if (this.engine) {
-      this.engine.dispose();
-      this.engine = null;
+    for (const slot of this.slots) {
+      if (slot.engine) {
+        slot.engine.dispose();
+        slot.engine = null;
+      }
+      slot.initPromise = null;
+      slot.queue = Promise.resolve();
+      slot.pending = 0;
     }
-    this.initPromise = null;
-    this.queue = Promise.resolve();
   }
 }

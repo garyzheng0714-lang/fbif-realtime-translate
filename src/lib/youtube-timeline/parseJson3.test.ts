@@ -87,4 +87,41 @@ describe('parseYouTubeJson3', () => {
     expect(result[0].endMs).toBe(2600);
     expect(result[0].endMs).toBeGreaterThanOrEqual(result[0].startMs);
   });
+
+  // WHY: YouTube ASR rolling captions emit overlapping [tStartMs, tStartMs+dDurationMs]
+  // ranges. If endMs is allowed to exceed the next cue's startMs, getActiveCue matches
+  // the stale earlier cue and TTS schedules two clips into the same window (overlapping
+  // dubbing). Clamping endMs to the next start keeps cue windows non-overlapping.
+  it('clamps a cue end that would overlap the next cue start', () => {
+    const result = parseYouTubeJson3({
+      events: [
+        { tStartMs: 1000, dDurationMs: 3000, segs: [{ utf8: 'First' }] },
+        { tStartMs: 2000, dDurationMs: 1000, segs: [{ utf8: 'Second' }] },
+      ],
+    });
+
+    expect(result[0].endMs).toBe(2000);
+    expect(result[0].endMs).toBeLessThanOrEqual(result[1].startMs);
+    expect(result[1].endMs).toBe(3000);
+  });
+
+  // WHY: innertube android fallback and segmented/appended caption tracks do not
+  // guarantee events arrive in ascending tStartMs order. Downstream getCueWindow,
+  // getActiveCue and conversation rendering all assume cues are sorted by startMs,
+  // so an out-of-order input would silently mis-window captions and pick the wrong
+  // nextStartMs for end clamping.
+  it('sorts out-of-order events by start time and computes ends from real neighbours', () => {
+    const result = parseYouTubeJson3({
+      events: [
+        { tStartMs: 3000, dDurationMs: 900, segs: [{ utf8: 'Third' }] },
+        { tStartMs: 1000, dDurationMs: 5000, segs: [{ utf8: 'First' }] },
+        { tStartMs: 2000, dDurationMs: 500, segs: [{ utf8: 'Second' }] },
+      ],
+    });
+
+    expect(result.map((cue) => cue.sourceText)).toEqual(['First', 'Second', 'Third']);
+    expect(result.map((cue) => cue.startMs)).toEqual([1000, 2000, 3000]);
+    expect(result[0].endMs).toBe(2000);
+    expect(result[1].endMs).toBe(2500);
+  });
 });

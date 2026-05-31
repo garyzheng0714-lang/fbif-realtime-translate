@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { ExtensionContentScriptSubtitleSurface } from './ExtensionContentScriptSubtitleSurface';
+import {
+  ExtensionContentScriptSubtitleSurface,
+  selectSubtitleConfig,
+  areSubtitleConfigsEqual,
+} from './ExtensionContentScriptSubtitleSurface';
 import { usePlaybackStore } from '../../../stores/playbackStore';
 
 // Mock SettingsService factory so settingsStore can be imported without
@@ -183,6 +187,118 @@ describe('ExtensionContentScriptSubtitleSurface', () => {
         content: [{ type: 'text', text: 'hello' }],
       },
     ]);
+  });
+
+  describe('config forwarding', () => {
+    const makePort = () => ({
+      name: 'sokuji-subtitle',
+      onMessage: { addListener: vi.fn() },
+      onDisconnect: { addListener: vi.fn() },
+      postMessage: vi.fn(),
+      disconnect: vi.fn(),
+    });
+
+    it('selectSubtitleConfig derives provider + language pair + turn detection from settings', async () => {
+      // WHY: the config selector is the single source of truth for what the
+      // iframe needs (provider, both languages, turn detection). Centralising
+      // the derivation here is what lets the subscription filter on these
+      // fields with an equality function instead of re-running a full callback
+      // on every unrelated settings write.
+      const { default: useSettingsStore } = await import('../../../stores/settingsStore');
+      useSettingsStore.setState({
+        provider: 'openai',
+        openai: {
+          ...useSettingsStore.getState().openai,
+          sourceLanguage: 'ja',
+          targetLanguage: 'ko',
+          turnDetectionMode: 'Normal',
+        },
+      } as any);
+
+      expect(selectSubtitleConfig(useSettingsStore.getState())).toEqual({
+        provider: 'openai',
+        sourceLanguage: 'ja',
+        targetLanguage: 'ko',
+        turnDetectionMode: 'Normal',
+      });
+    });
+
+    it('areSubtitleConfigsEqual treats only the four config fields as significant', () => {
+      // WHY: this equality function is moved in front of the subscription so an
+      // unrelated settings write (volume, noise reduction, etc.) is short
+      // circuited before the surface does any work. It must compare exactly the
+      // forwarded fields — no more, no less.
+      const base = {
+        provider: 'openai',
+        sourceLanguage: 'en',
+        targetLanguage: 'zh',
+        turnDetectionMode: 'Normal',
+      };
+      expect(areSubtitleConfigsEqual(base, { ...base })).toBe(true);
+      expect(areSubtitleConfigsEqual(base, { ...base, sourceLanguage: 'ja' })).toBe(false);
+      expect(areSubtitleConfigsEqual(base, { ...base, turnDetectionMode: 'Disabled' })).toBe(false);
+    });
+
+    it('forwards a config message when the language pair changes', async () => {
+      const { default: useSettingsStore } = await import('../../../stores/settingsStore');
+      useSettingsStore.setState({
+        provider: 'openai',
+        openai: {
+          ...useSettingsStore.getState().openai,
+          sourceLanguage: 'en',
+          targetLanguage: 'zh',
+        },
+      } as any);
+
+      const surface = new ExtensionContentScriptSubtitleSurface();
+      await surface.enter();
+      const port = makePort();
+      listeners.onConnect[0](port);
+      await new Promise((r) => setTimeout(r, 0));
+      port.postMessage.mockClear();
+
+      useSettingsStore.setState({
+        openai: {
+          ...useSettingsStore.getState().openai,
+          targetLanguage: 'ja',
+        },
+      } as any);
+      await new Promise((r) => setTimeout(r, 0));
+
+      const configMsgs = port.postMessage.mock.calls.filter(
+        (c: any[]) => c[0]?.type === 'config',
+      );
+      expect(configMsgs.length).toBe(1);
+      expect(configMsgs[0][0]).toMatchObject({ targetLanguage: 'ja' });
+    });
+
+    it('does not forward a config message on an unrelated settings write', async () => {
+      // WHY: settingsStore is written frequently during a session (e.g. a
+      // volume slider). Before the fix the surface subscribed without a
+      // selector, so every such write re-ran the whole pushConfig callback,
+      // only to dedupe at the very end. With a selector + equality function in
+      // front of the subscription, an unrelated write must not produce a
+      // config message — and, more importantly, must not even reach the
+      // callback. This asserts the observable half of that contract.
+      const { default: useSettingsStore } = await import('../../../stores/settingsStore');
+      useSettingsStore.setState({ provider: 'openai', uiMode: 'basic' } as any);
+
+      const surface = new ExtensionContentScriptSubtitleSurface();
+      await surface.enter();
+      const port = makePort();
+      listeners.onConnect[0](port);
+      await new Promise((r) => setTimeout(r, 0));
+      port.postMessage.mockClear();
+
+      // Write a top-level field that is NOT part of the forwarded config.
+      useSettingsStore.setState({ uiMode: 'advanced' } as any);
+      await new Promise((r) => setTimeout(r, 0));
+
+      const configMsgs = port.postMessage.mock.calls.filter(
+        (c: any[]) => c[0]?.type === 'config',
+      );
+      expect(configMsgs.length).toBe(0);
+    });
   });
 
   describe('playback forwarding', () => {
