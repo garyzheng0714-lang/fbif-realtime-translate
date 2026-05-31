@@ -44,7 +44,7 @@ import {
   CONVERSATION_FONT_SIZE_MAX,
 } from '../../stores/conversationDisplayStore';
 import useSessionStore, { useSession, useIsReconnecting, useSetIsReconnecting, useSetItems as useSetStoreItems, useSetSystemAudioItems as useSetStoreSystemAudioItems, useClearConversationVersion, useRequestClearConversation } from '../../stores/sessionStore';
-import { useAudioContext, useNoiseSuppressionMode } from '../../stores/audioStore';
+import { useAudioContext, useNoiseSuppressionMode, useToggleMonitorDeviceState } from '../../stores/audioStore';
 import { useLogActions } from '../../stores/logStore';
 import type { RealtimeEvent } from '../../stores/logStore';
 import { IClient, ConversationItem, SessionConfig, ClientEventHandlers, ClientFactory, ResponseConfig } from '../../services/clients';
@@ -89,7 +89,13 @@ import {
 import { getActiveCue, getCueWindow } from '../../lib/youtube-timeline/timelineScheduler';
 import { TimelineTts } from '../../lib/youtube-timeline/timelineTts';
 import { getTimelineCuesToTranslate, translateTimelineCueBatch, TranslationEngineTimelineTranslator } from '../../lib/youtube-timeline/timelineTranslate';
-import { timelineCuesToConversationItems } from '../../lib/youtube-timeline/timelineConversationItems';
+import {
+  detectSeek,
+  classifyCuePlayback,
+  shouldFailTimeline,
+  selectTranslatedCuesToStore,
+  patchConversationItemsForCues,
+} from '../../lib/youtube-timeline/timelinePlaybackDecisions';
 import { getTimelineUserMessage } from '../../lib/youtube-timeline/timelineErrors';
 import type { TimelineCue } from '../../lib/youtube-timeline/types';
 
@@ -339,6 +345,11 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   // Noise suppression
   const noiseSuppressionMode = useNoiseSuppressionMode();
 
+  // FBIF fork: used to force monitor output ON once when participant capture
+  // starts, keeping audioStore.isMonitorDeviceOn (the UI switch) in sync with the
+  // actual player volume instead of bypassing the store per delta (findings 10/12).
+  const toggleMonitorDeviceState = useToggleMonitorDeviceState();
+
   // Track if current session is using WebRTC transport
   const [isUsingWebRTC, setIsUsingWebRTC] = useState(false);
 
@@ -501,10 +512,11 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       if (delta?.audio) {
         const audioService = audioServiceRef.current;
         if (audioService) {
-          // FBIF fork: this product is for listening to translated podcast audio.
-          // Participant capture and monitor output are mutually exclusive in the
-          // upstream meeting UI, so force the player volume on for translated TTS.
-          audioService.setMonitorVolume(true);
+          // FBIF fork: monitor volume is forced on ONCE when participant capture
+          // starts (see startTabAudioRecording below), not on every delta. Calling
+          // it per delta (dozens/sec) overrode the user's monitor toggle and never
+          // wrote it back to audioStore, leaving the UI switch out of sync with
+          // actual output (findings 10 / 12).
           // participant 收到的 audio delta 应当全部是 AI 生成的 TTS, item.role 应为 'assistant'.
           // 与 speaker 路径同款判断, 防御性保留 (若上游某天放 user audio 过来则不播以免回声).
           const shouldPlayAudio = item.role === 'assistant';
@@ -908,7 +920,14 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   const timelinePreparedAudioRef = useRef<Map<string, PreparedTimelineAudio>>(new Map());
   const timelineGeneratingCueIdsRef = useRef<Set<string>>(new Set());
   const timelineQueuedCueIdsRef = useRef<Set<string>>(new Set());
+  // Cues that failed TTS once and must not be retried for the rest of the session
+  // (per-cue skip instead of failing the whole timeline — findings 9 / 15).
+  const timelineFailedCueIdsRef = useRef<Set<string>>(new Set());
   const timelineLastVideoTimeMsRef = useRef<number | null>(null);
+  // Wall-clock timestamp (performance.now) of the previous tick's video-time
+  // sample. detectSeek compares video advance against real elapsed wall-clock so
+  // a slow tick is not mistaken for a user scrub (findings 5 / 14).
+  const timelineLastTickWallClockMsRef = useRef<number | null>(null);
   const timelineStopRef = useRef<boolean>(false);
   const timelineSessionGenerationRef = useRef<number>(0);
   const timelineTranslationGenerationRef = useRef<number>(0);
@@ -1200,6 +1219,8 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     timelineGeneratingCueIdsRef.current.clear();
     timelineQueuedCueIdsRef.current.clear();
     timelineLastVideoTimeMsRef.current = null;
+    timelineLastTickWallClockMsRef.current = null;
+    timelineFailedCueIdsRef.current.clear();
     timelineTranslatorRef.current?.dispose();
     timelineTranslatorRef.current = null;
     timelineTtsRef.current?.dispose();
@@ -1243,7 +1264,22 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   }, []);
 
   useEffect(() => {
+    // Synchronously stop the timeline tick self-recursion before anything async.
+    // pagehide (side panel close) may not wait for promises, so flipping the
+    // generation gate + clearing the pending tick timeout here guarantees the
+    // self-scheduling tick() cannot fire again, query tabs, or setState on an
+    // unmounted component (findings 2 / 17).
+    const stopTimelineTick = () => {
+      timelineStopRef.current = true;
+      timelineSessionGenerationRef.current += 1;
+      if (timelineTickTimeoutRef.current !== null) {
+        window.clearTimeout(timelineTickTimeoutRef.current);
+        timelineTickTimeoutRef.current = null;
+      }
+    };
+
     const restoreOnTeardown = () => {
+      stopTimelineTick();
       void restoreTimelineOriginalAudio('panel teardown');
     };
 
@@ -1253,6 +1289,14 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     return () => {
       window.removeEventListener('pagehide', restoreOnTeardown);
       window.removeEventListener('beforeunload', restoreOnTeardown);
+      // Full teardown on unmount (e.g. switching to subtitle mode / route change
+      // where the JS context survives): stop the tick, then route through
+      // disconnectConversation for the complete teardown (closes tab capture and
+      // the AST2 client, disposes translator/TTS, restores original audio). The
+      // old cleanup only restored audio, leaving a wild tick timer + open ws
+      // running against the unmounted component (findings 2 / 17).
+      stopTimelineTick();
+      void disconnectConversationRef.current?.();
       void restoreTimelineOriginalAudio('panel unmount');
     };
   }, [restoreTimelineOriginalAudio]);
@@ -1324,13 +1368,20 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         timelineResponse.cues.map((cue) => timelineTranslatedCueMapRef.current.get(cue.id) ?? cue)
       );
 
-      const updateTimelineCaptions = () => {
+      const updateTimelineCaptions = (newlyTranslatedCues: TimelineCue[]) => {
         const translatedCues = getTranslatedTimelineCues();
         setTimelineCaptionsReady({
           ...timelineResponse,
           cues: translatedCues,
         });
-        setSystemAudioItems(timelineCuesToConversationItems(translatedCues, timelineConversationBaseTime));
+        // Patch only the items for the cues that just got translated instead of
+        // rebuilding the whole array from every cue on each batch. Rebuilding
+        // forced an O(n) memo recompute + a full cross-process subtitle push per
+        // batch (findings 4 / 8); patchConversationItemsForCues reuses untouched
+        // item objects and returns the same reference when nothing changed.
+        setSystemAudioItems((prev) =>
+          patchConversationItemsForCues(prev, newlyTranslatedCues, timelineConversationBaseTime),
+        );
       };
 
       const recreateTranslator = () => {
@@ -1338,6 +1389,75 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         timelineTranslatorRef.current = new TranslationEngineTimelineTranslator({
           sourceLanguage: response.sourceLanguage || 'en',
         });
+      };
+
+      const prepareCueAudio = async (cue: TimelineCue) => {
+        if (
+          !isTimelineSessionActive() ||
+          cue.translatedText === undefined ||
+          // A cue whose first TTS attempt failed must not be retried for the rest
+          // of the session — per-cue skip instead of failing the whole timeline
+          // (findings 9 / 15).
+          timelineFailedCueIdsRef.current.has(cue.id) ||
+          timelinePreparedAudioRef.current.has(cue.id) ||
+          timelineGeneratingCueIdsRef.current.has(cue.id) ||
+          timelineQueuedCueIdsRef.current.has(cue.id)
+        ) {
+          return;
+        }
+
+        // Blank translated text is a per-cue data problem, not a session-fatal one.
+        // The old code threw here and let it bubble to failTimeline, so one empty
+        // Bing reply stopped the whole video (findings 9 / 15). Skip the cue and
+        // record it so prepareCueAudio does not re-pick it next window.
+        if (cue.translatedText.trim() === '') {
+          timelineFailedCueIdsRef.current.add(cue.id);
+          return;
+        }
+
+        // The TTS instance is owned by startTimelineConversation / resetAfterSeek,
+        // which are guarded by the session generation. prepareCueAudio is
+        // fire-and-forget, so creating the instance here could resurrect a TTS
+        // (and its edge-tts WebSocket) right after disconnect/reset nulled it,
+        // leaking the socket (finding 19). If the ref is gone, the session is
+        // being torn down — just bail.
+        const tts = timelineTtsRef.current;
+        if (!tts) return;
+
+        timelineGeneratingCueIdsRef.current.add(cue.id);
+        const chunks: Int16Array[] = [];
+
+        try {
+          await tts.generateChinese(cue.translatedText, (chunk) => {
+            if (!isTimelineSessionActive()) return;
+            chunks.push(chunk.samples);
+          });
+
+          if (
+            isTimelineSessionActive() &&
+            !timelineQueuedCueIdsRef.current.has(cue.id) &&
+            chunks.length > 0
+          ) {
+            timelinePreparedAudioRef.current.set(cue.id, { cue, chunks });
+          }
+        } catch (error) {
+          if (error instanceof Error && error.message === 'Timeline TTS disposed') {
+            return;
+          }
+          // A single cue's TTS failure is degraded to a per-cue skip, never a
+          // session-fatal failTimeline (findings 9 / 15). Only escalate if the
+          // error class is genuinely unrecoverable for the whole session.
+          if (isTimelineSessionActive()) {
+            timelineFailedCueIdsRef.current.add(cue.id);
+            if (shouldFailTimeline(error)) {
+              throw error;
+            }
+          }
+        } finally {
+          if (generation === timelineSessionGenerationRef.current) {
+            timelineGeneratingCueIdsRef.current.delete(cue.id);
+          }
+        }
       };
 
       const translateCueWindow = async (cueWindow: TimelineCue[]) => {
@@ -1363,10 +1483,27 @@ const MainPanel: React.FC<MainPanelProps> = () => {
           const translatedCues = await translateTimelineCueBatch(candidates, translator, 'zh');
           if (!isTimelineSessionActive() || translationGeneration !== timelineTranslationGenerationRef.current) return;
 
-          for (const cue of translatedCues) {
+          // 波1 made translateTimelineCueBatch return the original cue (translatedText
+          // still undefined) on a blank reply instead of throwing. Storing such a cue
+          // would mark it permanently "translated" and it would never be retried in a
+          // later window, so only store the cues that actually got text (finding 9).
+          const storableCues = selectTranslatedCuesToStore(translatedCues);
+          for (const cue of storableCues) {
             timelineTranslatedCueMapRef.current.set(cue.id, cue);
           }
-          updateTimelineCaptions();
+          updateTimelineCaptions(storableCues);
+
+          // Event-driven pipeline: kick off TTS for the cues that just finished
+          // translating instead of waiting for the next tick (>=350ms later) to
+          // poll and discover translatedText is ready, so translation and dubbing
+          // overlap rather than stacking serially (finding 3).
+          for (const cue of storableCues) {
+            void prepareCueAudio(cue).catch((error) => {
+              if (generation !== timelineSessionGenerationRef.current) return;
+              if (error instanceof Error && error.message === 'Timeline TTS disposed') return;
+              failTimeline(error);
+            });
+          }
         } catch (error) {
           if (error instanceof Error && error.message === 'Timeline translation disposed') {
             return;
@@ -1383,60 +1520,15 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         }
       };
 
-      const prepareCueAudio = async (cue: TimelineCue) => {
-        if (
-          !isTimelineSessionActive() ||
-          cue.translatedText === undefined ||
-          timelinePreparedAudioRef.current.has(cue.id) ||
-          timelineGeneratingCueIdsRef.current.has(cue.id) ||
-          timelineQueuedCueIdsRef.current.has(cue.id)
-        ) {
-          return;
-        }
-
-        timelineGeneratingCueIdsRef.current.add(cue.id);
-        const chunks: Int16Array[] = [];
-
-        try {
-          if (!timelineTtsRef.current) {
-            timelineTtsRef.current = new TimelineTts();
-          }
-          const tts = timelineTtsRef.current;
-          if (cue.translatedText.trim() === '') {
-            throw new Error('视频同步模式字幕翻译结果为空，已停止播放以避免朗读英文原文');
-          }
-          await tts.generateChinese(cue.translatedText, (chunk) => {
-            if (!isTimelineSessionActive()) return;
-            chunks.push(chunk.samples);
-          });
-
-          if (
-            isTimelineSessionActive() &&
-            !timelineQueuedCueIdsRef.current.has(cue.id) &&
-            chunks.length > 0
-          ) {
-            timelinePreparedAudioRef.current.set(cue.id, { cue, chunks });
-          }
-        } catch (error) {
-          if (error instanceof Error && error.message === 'Timeline TTS disposed') {
-            return;
-          }
-          if (isTimelineSessionActive()) {
-            throw error;
-          }
-        } finally {
-          if (generation === timelineSessionGenerationRef.current) {
-            timelineGeneratingCueIdsRef.current.delete(cue.id);
-          }
-        }
-      };
-
       const resetAfterSeek = () => {
         if (!isTimelineSessionActive()) return;
         audioServiceRef.current?.clearStreamingTrack(timelineTrackId);
         timelinePreparedAudioRef.current.clear();
         timelineGeneratingCueIdsRef.current.clear();
         timelineQueuedCueIdsRef.current.clear();
+        // A real seek lands on a different part of the video, so cues that failed
+        // earlier deserve a fresh attempt — clear the per-cue skip set too.
+        timelineFailedCueIdsRef.current.clear();
         timelineTranslationGenerationRef.current += 1;
         timelineTranslatingCueIdsRef.current.clear();
         recreateTranslator();
@@ -1462,11 +1554,25 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         }
 
         const currentTimeMs = videoTime.currentTimeMs;
+        const nowWallClockMs = performance.now();
         const lastVideoTimeMs = timelineLastVideoTimeMsRef.current;
-        if (lastVideoTimeMs !== null && Math.abs(currentTimeMs - lastVideoTimeMs) > seekThresholdMs) {
+        const lastWallClockMs = timelineLastTickWallClockMsRef.current;
+        // Compare how far the video advanced against how much wall-clock actually
+        // elapsed between ticks. A slow tick (blocked main thread) advances the
+        // video past the old fixed threshold without any user input; only a jump
+        // far beyond the elapsed wall-clock — or any backward jump — is a real
+        // seek. This stops the "stall -> false seek -> teardown -> worse stall"
+        // avalanche (findings 5 / 14).
+        const elapsedWallClockMs =
+          lastWallClockMs === null ? null : nowWallClockMs - lastWallClockMs;
+        if (detectSeek(lastVideoTimeMs, currentTimeMs, elapsedWallClockMs, {
+          jumpToleranceMs: seekThresholdMs,
+          minElapsedMs: 50,
+        })) {
           resetAfterSeek();
         }
         timelineLastVideoTimeMsRef.current = currentTimeMs;
+        timelineLastTickWallClockMsRef.current = nowWallClockMs;
 
         const timelineCues = getTranslatedTimelineCues();
         const activeCue = getActiveCue(timelineCues, currentTimeMs);
@@ -1478,37 +1584,47 @@ const MainPanel: React.FC<MainPanelProps> = () => {
           }
         }
 
-        const cueWindow = getCueWindow(timelineCues, currentTimeMs, prebufferMs);
-        translateCueWindow(cueWindow).catch((error) => {
+        // Process the nearest cues first so the caption about to play wins the
+        // translate/TTS pools over far-future cues in the same window (finding 18).
+        // getCueWindow preserves the (already start-sorted) cue order, but sort
+        // defensively so the priority is explicit and independent of caller order.
+        const cueWindow = getCueWindow(timelineCues, currentTimeMs, prebufferMs)
+          .slice()
+          .sort((a, b) => a.startMs - b.startMs);
+        const escalateIfFatal = (error: unknown) => {
           if (generation !== timelineSessionGenerationRef.current) return;
           if (error instanceof Error && error.message === 'Timeline translation disposed') return;
-          failTimeline(error);
-        });
-        for (const cue of cueWindow) {
-          prepareCueAudio(cue).catch((error) => {
-            if (generation !== timelineSessionGenerationRef.current) return;
-            if (error instanceof Error && error.message === 'Timeline TTS disposed') return;
+          if (error instanceof Error && error.message === 'Timeline TTS disposed') return;
+          // Per-cue failures are degraded inside prepareCueAudio/translateCueWindow;
+          // only escalate genuinely session-fatal errors here (findings 9 / 15).
+          if (shouldFailTimeline(error)) {
             failTimeline(error);
-          });
+          }
+        };
+        // translateCueWindow now also kicks off TTS for each freshly translated cue
+        // (event-driven pipeline, finding 3). The per-cue prepareCueAudio loop below
+        // stays as a backstop for cues whose translation landed on an earlier tick.
+        translateCueWindow(cueWindow).catch(escalateIfFatal);
+        for (const cue of cueWindow) {
+          void prepareCueAudio(cue).catch(escalateIfFatal);
         }
 
         if (!videoTime.paused) {
           for (const cue of cueWindow) {
             if (!isTimelineSessionActive()) return;
 
-            const missedStartWindow = currentTimeMs > cue.startMs + maxLateStartMs;
-            const tooLittleRemaining = cue.endMs - currentTimeMs < minRemainingCueMs;
-            if (missedStartWindow || tooLittleRemaining) {
+            const decision = classifyCuePlayback(cue, currentTimeMs, {
+              smallLeadMs,
+              maxLateStartMs,
+              minRemainingCueMs,
+            });
+            if (decision === 'skip') {
               timelinePreparedAudioRef.current.delete(cue.id);
               timelineQueuedCueIdsRef.current.add(cue.id);
               continue;
             }
 
-            if (
-              timelineQueuedCueIdsRef.current.has(cue.id) ||
-              cue.startMs > currentTimeMs + smallLeadMs ||
-              cue.endMs <= currentTimeMs
-            ) {
+            if (decision === 'wait' || timelineQueuedCueIdsRef.current.has(cue.id)) {
               continue;
             }
 
@@ -2060,6 +2176,16 @@ const MainPanel: React.FC<MainPanelProps> = () => {
             }
 
             console.info(`[Sokuji] [MainPanel] Participant audio recording started (${captureMode})`);
+
+            // FBIF fork: force monitor output ON once, here, when participant
+            // capture starts — this product exists to listen to the translated
+            // dubbing. Going through toggleMonitorDeviceState (rather than the bare
+            // setMonitorVolume on every delta) also writes audioStore.isMonitorDeviceOn
+            // so the UI switch matches actual output (findings 10 / 12). Only toggle
+            // when it is currently off, so we never flip a user who turned it on.
+            if (!isMonitorDeviceOn) {
+              toggleMonitorDeviceState();
+            }
           }
         } catch (error: any) {
           console.error('[Sokuji] [MainPanel] Failed to start participant audio client:', error);
@@ -2150,6 +2276,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     selectedInputDevice,
     isInputDeviceOn,
     isMonitorDeviceOn,
+    toggleMonitorDeviceState,
     selectedMonitorDevice,
     selectMonitorDevice,
     isRealVoicePassthroughEnabled,
