@@ -141,4 +141,53 @@ describe('VolcengineAST2StreamingTTSDecoder sentence serialization', () => {
     releaseFlush!();
     await pendingFinish;
   });
+
+  it('a previous sentence chunk emitting after the next sentence started does not pollute the new sentence flags', async () => {
+    // WHY: synchronous flag reset (previous fix) is necessary but NOT sufficient.
+    // Sentence 1's decodeChunk is fire-and-forget; if its decode() is still
+    // in flight when sentence 2's TTSSentenceStart resets emittedAudio=false, the
+    // late chunk resolves AFTER the reset and emitDecoded would flip emittedAudio
+    // back to true — sentence 2 then reads a polluted flag and its dubbing is
+    // misclassified/dropped. A chunk must only emit + touch flags if its sentence
+    // is still current; a superseded sentence's late chunk is skipped (the queued
+    // reset wipes the shared decoder anyway).
+    const waitFor = async (predicate: () => boolean): Promise<void> => {
+      for (let i = 0; i < 50 && !predicate(); i++) {
+        await Promise.resolve();
+      }
+    };
+    let releaseDecode: (() => void) | null = null;
+    let decodeCalls = 0;
+    const decoder = new VolcengineAST2StreamingTTSDecoder(
+      async () => ({
+        ready: Promise.resolve(),
+        decode: async () => {
+          decodeCalls++;
+          if (decodeCalls === 1) {
+            await new Promise<void>((resolve) => { releaseDecode = resolve; });
+          }
+          return { channelData: [new Float32Array([0.5])], samplesDecoded: 1 };
+        },
+        flush: async () => ({ channelData: [], samplesDecoded: 0 }),
+        reset: async () => {},
+        free: () => {},
+      }),
+      () => {}
+    );
+
+    await decoder.startSentence(); // sentence 1
+    const staleChunk = decoder.decodeChunk(new Uint8Array([1])); // sentence 1 chunk: decode hangs
+    await waitFor(() => releaseDecode !== null);
+
+    // Sentence 2 begins while sentence 1's chunk is still decoding.
+    void decoder.startSentence();
+    expect(decoder.hasEmittedAudio()).toBe(false);
+
+    // Sentence 1's late chunk finishes now; it must NOT emit under sentence 2.
+    releaseDecode!();
+    await staleChunk.catch(() => {});
+    await waitFor(() => false); // settle microtasks
+
+    expect(decoder.hasEmittedAudio()).toBe(false);
+  });
 });

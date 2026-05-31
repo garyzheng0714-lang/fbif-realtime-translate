@@ -83,7 +83,7 @@ describe('requestCaptions', () => {
       sourceLanguage: 'en',
       cues: [
         {
-          id: 'yt-1000-Hello timeline',
+          id: 'yt-1000',
           startMs: 1000,
           endMs: 2500,
           sourceText: 'Hello timeline',

@@ -89,12 +89,16 @@ export function parseYouTubeJson3(payload: unknown): TimelineCue[] {
 
     return {
       // The id is the de-dupe key used by mergeNewCues across repeated live
-      // re-fetches, so it must depend only on stable content. Earlier ids embedded
-      // the running index and the next-start-clamped endMs, both of which shift
-      // between fetches when an earlier event's text/parsability changes; the same
-      // line then got a new id and was appended (and re-dubbed) as a duplicate.
-      // startMs + sourceText identifies a caption line stably across fetches.
-      id: `yt-${startMs}-${text}`,
+      // re-fetches, so it must depend only on the most stable thing about a line.
+      // Earlier ids embedded the running index and the next-start-clamped endMs
+      // (both shift when an earlier event's parsability changes), and a later
+      // revision still embedded sourceText — but live ASR rolling captions refine
+      // the SAME line under the SAME tStartMs ("Hello" -> "Hello world"), so any
+      // text in the id makes the refined emission look like a new cue and it gets
+      // appended + re-dubbed as a duplicate. startMs alone identifies the line:
+      // events sharing a tStartMs are already collapsed above, so it is unique
+      // within a fetch and stable across fetches.
+      id: `yt-${startMs}`,
       startMs,
       endMs,
       sourceText: text,

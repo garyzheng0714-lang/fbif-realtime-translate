@@ -15,7 +15,7 @@ describe('parseYouTubeJson3', () => {
 
     expect(result).toEqual([
       {
-        id: 'yt-1250-Hello world',
+        id: 'yt-1250',
         startMs: 1250,
         endMs: 3350,
         sourceText: 'Hello world',
@@ -236,5 +236,25 @@ describe('parseYouTubeJson3', () => {
     // identical so mergeNewCues treats them as the same cue (no duplicate append).
     expect(firstReal.endMs).not.toBe(secondReal.endMs);
     expect(secondReal.id).toBe(firstReal.id);
+  });
+
+  // WHY: live ASR rolling captions refine the SAME line under the SAME tStartMs
+  // over successive fetches ("Hello" -> "Hello world"). If the id embeds the text,
+  // the refined emission gets a new id, mergeNewCues appends it as a brand-new cue
+  // sharing the same startMs, and getActiveCue/getCueWindow then schedule two TTS
+  // clips into one slot (duplicate dubbing + subtitle ghosting). The id must stay
+  // stable across text refinement, so it derives from startMs alone.
+  it('keeps a stable id when live ASR refines the same line text across fetches', () => {
+    const first = parseYouTubeJson3({
+      events: [{ tStartMs: 1000, dDurationMs: 2000, segs: [{ utf8: 'Hello' }] }],
+    });
+    const second = parseYouTubeJson3({
+      events: [{ tStartMs: 1000, dDurationMs: 2000, segs: [{ utf8: 'Hello world' }] }],
+    });
+
+    expect(first[0].sourceText).toBe('Hello');
+    expect(second[0].sourceText).toBe('Hello world');
+    // Same line (same start), refined text -> same id so it is not re-dubbed.
+    expect(second[0].id).toBe(first[0].id);
   });
 });
