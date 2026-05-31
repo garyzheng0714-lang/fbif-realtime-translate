@@ -242,6 +242,13 @@ export interface IAudioService {
   stopTabAudioRecording(): Promise<void>;
 
   /**
+   * Synchronously stop tab audio capture during page teardown (side-panel
+   * pagehide), where promises will not resolve. Optional: only the extension's
+   * tab-capture service implements it. Fire-and-forget and idempotent.
+   */
+  stopTabAudioRecordingSync?(): void;
+
+  /**
    * Check if tab audio recording is currently active
    */
   isTabAudioRecordingActive(): boolean;

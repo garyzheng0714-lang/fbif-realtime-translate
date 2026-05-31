@@ -1343,6 +1343,19 @@ export class ModernBrowserAudioService implements IAudioService {
     return this.tabAudioRecordingActive;
   }
 
+  /**
+   * Synchronously stop tab audio capture on teardown (side-panel pagehide).
+   * pagehide does not wait for promises, so the async stopTabAudioRecording()
+   * chain (recorder.end() -> STOP_TAB_CAPTURE) would be cut short and the
+   * background would keep the capture alive, leaving the tab's original audio
+   * suppressed by Chrome tabCapture. This fires the STOP message synchronously.
+   */
+  public stopTabAudioRecordingSync(): void {
+    if (!this.tabAudioRecordingActive) return;
+    this.tabAudioRecorder?.requestStopCaptureSync();
+    this.tabAudioRecordingActive = false;
+  }
+
   // ============================================
   // Unified Participant Audio Methods
   // ============================================

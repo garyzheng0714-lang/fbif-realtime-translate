@@ -111,6 +111,24 @@ export class TabAudioRecorder extends ParticipantRecorder {
     this.streamId = null;
   }
 
+  /**
+   * Synchronously tell the background script to stop this tab's capture, without
+   * awaiting the reply. Used on side-panel pagehide, where the page is being torn
+   * down and promises will never resolve, so the normal async end()/onCleanup
+   * STOP_TAB_CAPTURE message would be dropped — leaving the captured tab muted
+   * (Chrome tabCapture suppresses original audio) until tabs.onRemoved eventually
+   * fires (which only happens if the whole tab closes, not the panel alone).
+   * Fire-and-forget is enough: background's STOP_TAB_CAPTURE is idempotent.
+   */
+  public requestStopCaptureSync(): void {
+    if (typeof chrome === 'undefined' || !chrome.runtime || !this.tabId) return;
+    try {
+      chrome.runtime.sendMessage({ type: 'STOP_TAB_CAPTURE', tabId: this.tabId });
+    } catch (error) {
+      console.warn(`${this.getLogPrefix()} Sync stop-capture message failed:`, error);
+    }
+  }
+
   private async getTabIdFromContext(): Promise<number | null> {
     const urlParams = new URLSearchParams(window.location.search);
     const tabIdParam = urlParams.get('tabId');

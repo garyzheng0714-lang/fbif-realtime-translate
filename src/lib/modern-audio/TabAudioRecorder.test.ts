@@ -14,6 +14,10 @@ class TestableTabAudioRecorder extends TabAudioRecorder {
   public acquireStreamForTest(options?: ParticipantAudioOptions): Promise<MediaStream> {
     return this.acquireStream(options);
   }
+
+  public setTabIdForTest(tabId: number | null): void {
+    (this as unknown as { tabId: number | null }).tabId = tabId;
+  }
 }
 
 describe('TabAudioRecorder passthrough', () => {
@@ -137,5 +141,51 @@ describe('TabAudioRecorder stream acquisition failure cleanup', () => {
 
     const stopMessages = sentMessages.filter((m) => m.type === 'STOP_TAB_CAPTURE');
     expect(stopMessages).toHaveLength(0);
+  });
+});
+
+describe('TabAudioRecorder synchronous teardown', () => {
+  const sentMessages: any[] = [];
+
+  beforeEach(() => {
+    sentMessages.length = 0;
+    (globalThis as any).chrome = {
+      runtime: {
+        lastError: null,
+        // The sync path uses the no-callback sendMessage overload (fire-and-forget),
+        // so this mock just records the message and returns.
+        sendMessage: vi.fn((message: any) => {
+          sentMessages.push(message);
+        }),
+      },
+    };
+  });
+
+  afterEach(() => {
+    delete (globalThis as any).chrome;
+    vi.restoreAllMocks();
+  });
+
+  it('synchronously sends STOP_TAB_CAPTURE for the captured tab on pagehide teardown', () => {
+    // WHY: side-panel pagehide does not await promises, so the async end() ->
+    // STOP_TAB_CAPTURE chain is cut short and the captured tab stays muted by
+    // Chrome tabCapture. The sync path must fire the STOP without awaiting.
+    const recorder = new TestableTabAudioRecorder();
+    recorder.setTabIdForTest(42);
+
+    recorder.requestStopCaptureSync();
+
+    expect(sentMessages).toEqual([{ type: 'STOP_TAB_CAPTURE', tabId: 42 }]);
+  });
+
+  it('does nothing when there is no captured tab id', () => {
+    // WHY: without an active capture there is nothing to stop; firing a STOP for
+    // a null tab would be a meaningless (and potentially mis-targeted) message.
+    const recorder = new TestableTabAudioRecorder();
+    recorder.setTabIdForTest(null);
+
+    recorder.requestStopCaptureSync();
+
+    expect(sentMessages).toHaveLength(0);
   });
 });

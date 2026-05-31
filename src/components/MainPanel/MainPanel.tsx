@@ -95,7 +95,9 @@ import {
   shouldFailTimeline,
   selectTranslatedCuesToStore,
   patchConversationItemsForCues,
+  resolveTranslatedCues,
 } from '../../lib/youtube-timeline/timelinePlaybackDecisions';
+import { mergeNewCues } from '../../lib/youtube-timeline/timelineCaptionMerge';
 import { getTimelineUserMessage } from '../../lib/youtube-timeline/timelineErrors';
 import { decideStreamingCueAction } from '../../lib/youtube-timeline/timelineStreamingPlayback';
 import type { TimelineCue } from '../../lib/youtube-timeline/types';
@@ -940,6 +942,10 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   const timelineSessionGenerationRef = useRef<number>(0);
   const timelineTranslationGenerationRef = useRef<number>(0);
   const timelineTickTimeoutRef = useRef<number | null>(null);
+  // Low-frequency timer that re-fetches captions during the session so a live /
+  // dynamically-growing caption track's newly-appended cues get merged in (the
+  // start-of-session requestCaptions only grabs the cues available then).
+  const timelineCaptionRefreshTimeoutRef = useRef<number | null>(null);
   const timelineOriginalAudioMutedRef = useRef<TimelineOriginalAudioMutedState | null>(null);
   // The YouTube tab is fixed for the whole timeline session once captions are
   // fetched. Caching its id lets the tick poll video time straight from that tab
@@ -1225,6 +1231,10 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       window.clearTimeout(timelineTickTimeoutRef.current);
       timelineTickTimeoutRef.current = null;
     }
+    if (timelineCaptionRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(timelineCaptionRefreshTimeoutRef.current);
+      timelineCaptionRefreshTimeoutRef.current = null;
+    }
     timelineTranslationGenerationRef.current += 1;
     timelineTranslatedCueMapRef.current.clear();
     timelineTranslatingCueIdsRef.current.clear();
@@ -1290,11 +1300,22 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         window.clearTimeout(timelineTickTimeoutRef.current);
         timelineTickTimeoutRef.current = null;
       }
+      if (timelineCaptionRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(timelineCaptionRefreshTimeoutRef.current);
+        timelineCaptionRefreshTimeoutRef.current = null;
+      }
     };
 
     const restoreOnTeardown = () => {
       stopTimelineTick();
       void restoreTimelineOriginalAudio('panel teardown');
+      // pagehide (side panel closed alone) does not run disconnectConversation,
+      // and tabs.onRemoved only fires when the whole tab closes — so the AST2
+      // path's tab capture would stay alive with the tab's original audio
+      // suppressed by Chrome tabCapture. Stop it synchronously here (the async
+      // stopTabAudioRecording would be cut short by the unload). No-op when no
+      // capture is active, so a normal disconnect is never disturbed.
+      audioServiceRef.current?.stopTabAudioRecordingSync?.();
     };
 
     window.addEventListener('pagehide', restoreOnTeardown);
@@ -1317,6 +1338,10 @@ const MainPanel: React.FC<MainPanelProps> = () => {
 
   const startTimelineConversation = useCallback(async () => {
     const tickMs = 350;
+    // How often to re-fetch captions for live / growing tracks (finding ①). Low
+    // frequency: live cues trickle in, and a full caption fetch is far heavier
+    // than a video-time poll, so this stays well above the 350ms tick cadence.
+    const captionRefreshMs = 20_000;
     const prebufferMs = 10_000;
     const smallLeadMs = 150;
     const maxLateStartMs = 750;
@@ -1383,7 +1408,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       setIsSessionActive(true);
 
       const getTranslatedTimelineCues = (): TimelineCue[] => (
-        timelineResponse.cues.map((cue) => timelineTranslatedCueMapRef.current.get(cue.id) ?? cue)
+        resolveTranslatedCues(timelineResponse.cues, timelineTranslatedCueMapRef.current)
       );
 
       const updateTimelineCaptions = (newlyTranslatedCues: TimelineCue[]) => {
@@ -1577,6 +1602,39 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         }, tickMs);
       };
 
+      // Periodically re-fetch captions and merge any newly-appended cues into the
+      // session's cue list. The start-of-session requestCaptions only captures the
+      // cues available then, so a live / dynamically-growing caption track would
+      // otherwise never surface cues that appear later. mergeNewCues keeps the
+      // existing (possibly already-translated / mid-playback) cue objects and only
+      // appends genuinely new ids, so an in-flight translation or playback is never
+      // disturbed. A caption fetch failure is non-fatal here — we just keep the
+      // cues we have and try again next interval (the live track may briefly be
+      // unavailable mid-stream). The whole loop is gated by the session generation.
+      const refreshCaptions = async (): Promise<void> => {
+        if (!isTimelineSessionActive()) return;
+        try {
+          const { cues: fetchedCues, videoId: fetchedVideoId } = await requestCaptions();
+          if (!isTimelineSessionActive()) return;
+          // A different video id means the user navigated away; the seek/video-id
+          // guards in the tick own that transition, so just skip this refresh.
+          if (fetchedVideoId !== timelineResponse.videoId) return;
+          timelineResponse.cues = mergeNewCues(timelineResponse.cues, fetchedCues);
+        } catch (error) {
+          console.warn('[Sokuji] [MainPanel] Live caption refresh failed (keeping current cues):', error);
+        }
+      };
+
+      const scheduleCaptionRefresh = () => {
+        if (!isTimelineSessionActive()) return;
+        timelineCaptionRefreshTimeoutRef.current = window.setTimeout(() => {
+          if (!isTimelineSessionActive()) return;
+          void refreshCaptions().finally(() => {
+            scheduleCaptionRefresh();
+          });
+        }, captionRefreshMs);
+      };
+
       const tick = async (): Promise<void> => {
         const videoTabId = timelineVideoTabIdRef.current;
         // tabId is set right after requestCaptions succeeds, before the first
@@ -1734,6 +1792,10 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       };
 
       await tick();
+      // Start the low-frequency live-caption refresh loop once the first tick has
+      // run (and only if the session is still active after it). It self-schedules
+      // independently of the tick and is torn down via the same generation gate.
+      scheduleCaptionRefresh();
     } catch (error) {
       failTimeline(error);
     }
