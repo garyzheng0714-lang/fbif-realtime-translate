@@ -1,4 +1,8 @@
 import { TtsEngine } from '../local-inference/engine/TtsEngine';
+// Reuse the shared PCM quantizer instead of a byte-identical private copy so the
+// timeline dub and every other TTS output (LocalInferenceClient / gtcrn) stay in
+// lockstep if the quantization strategy ever changes (finding 9).
+import { float32ToInt16 } from '../../utils/audio-conversion';
 
 export interface TimelineTtsChunk {
   samples: Int16Array;
@@ -10,19 +14,6 @@ export interface TimelineTtsChunk {
 // several short cues synthesize in parallel, which is what keeps dubbing prebuffer from
 // falling behind playback. Two to four engines balances parallelism against socket cost.
 const TTS_POOL_SIZE = 3;
-
-function floatToInt16(samples: Float32Array): Int16Array {
-  const output = new Int16Array(samples.length);
-
-  for (let i = 0; i < samples.length; i++) {
-    const clamped = Math.max(-1, Math.min(1, samples[i]));
-    output[i] = clamped < 0
-      ? clamped * 0x8000
-      : clamped * 0x7fff;
-  }
-
-  return output;
-}
 
 interface TtsSlot {
   engine: TtsEngine | null;
@@ -162,7 +153,7 @@ export class TimelineTts {
         (samples, sampleRate) => {
           if (generation !== this.generation) return;
           onChunk({
-            samples: floatToInt16(samples),
+            samples: float32ToInt16(samples),
             sampleRate,
           });
         },

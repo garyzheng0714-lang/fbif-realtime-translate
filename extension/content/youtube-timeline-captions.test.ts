@@ -653,6 +653,60 @@ describe('youtube timeline captions content script', () => {
     expect(video.muted).toBe(false);
   });
 
+  // Why this matters: when the user's original video was ALREADY muted before
+  // the session, the restore call replays muted=true (the captured snapshot).
+  // The module-level snapshot is reused across sessions on the same persistent
+  // content-script instance. If restore does not clear the snapshot when the
+  // restored value happens to be `true`, the stale `true` leaks into the next
+  // session: even after the user un-mutes the video, the next mute(true) skips
+  // re-capture, reuses the stale `true`, and the following restore wrongly
+  // keeps the now-should-be-audible video silenced. Restore is a one-shot
+  // consume — it must clear the snapshot regardless of the restored value.
+  it('clears the snapshot after restoring an originally-muted video so the next session re-captures', () => {
+    // Session 1: user entered the page with the video already muted.
+    const video = { muted: true };
+    const contentScript = installContentScript(video);
+
+    // Start translation: mute(true). Captures the pre-intervention state (true).
+    const startA = contentScript.send({
+      type: 'fbif:youtube-timeline:v2:set-original-audio-muted',
+      muted: true,
+      videoId: 'video-123',
+    }) as any;
+    expect(startA.payload.previousMuted).toBe(true);
+
+    // Session 1 ends: the caller replays the captured value (true) to restore.
+    const restoreA = contentScript.send({
+      type: 'fbif:youtube-timeline:v2:set-original-audio-muted',
+      muted: true,
+      videoId: 'video-123',
+    }) as any;
+    expect(restoreA.payload.previousMuted).toBe(true);
+
+    // Between sessions the user UN-mutes the video themselves.
+    video.muted = false;
+
+    // Session 2 starts on the SAME content-script instance: mute(true) must
+    // re-capture the now-live false, NOT reuse the leaked snapshot from
+    // session 1. If the snapshot leaked, previousMuted would wrongly be true.
+    const startB = contentScript.send({
+      type: 'fbif:youtube-timeline:v2:set-original-audio-muted',
+      muted: true,
+      videoId: 'video-123',
+    }) as any;
+    expect(startB.payload.previousMuted).toBe(false);
+
+    // Session 2 ends: restore replays the freshly captured false, leaving the
+    // video audible — which is what the user expects.
+    const restoreB = contentScript.send({
+      type: 'fbif:youtube-timeline:v2:set-original-audio-muted',
+      muted: false,
+      videoId: 'video-123',
+    }) as any;
+    expect(restoreB.payload.previousMuted).toBe(false);
+    expect(video.muted).toBe(false);
+  });
+
   // Why this matters: parsing ytInitialPlayerResponse out of <script> text is a
   // single fragile point — YouTube has repeatedly changed how that global is
   // injected, and an A/B variant can leave it absent. The live player exposes

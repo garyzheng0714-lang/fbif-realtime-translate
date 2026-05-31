@@ -419,6 +419,38 @@ describe('VolcengineAST2Client reconnection', () => {
     expect(client.isConnected()).toBe(true);
   });
 
+  it('does not reconnect a socket that closed before it ever reached SessionStarted', async () => {
+    // WHY (finding 5): the reconnect gate keys off sessionEverStarted. A socket
+    // that closes before SessionStarted (auth/rate-limit/capacity rejection on
+    // first connect) must NOT trigger a transparent reconnect — there is no
+    // established session to preserve, so onClose must surface to the UI. This
+    // pins the behaviour that the now-removed "closedBeforeSessionStarted" guard
+    // was (redundantly) protecting: sessionEverStarted=false alone already keeps
+    // pre-session closes out of the reconnect path.
+    vi.useFakeTimers();
+    const events: string[] = [];
+    const client = new VolcengineAST2Client('app-id', '', 'volc.service_type.10053');
+    client.setEventHandlers({
+      onReconnecting: () => events.push('reconnecting'),
+      onClose: () => events.push('close'),
+    });
+
+    const connectPromise = client.connect(ast2Config);
+    await Promise.resolve();
+    const ws = lastSocket();
+    ws.open(); // upgrade succeeds, StartSession sent, but SessionStarted never arrives
+    await Promise.resolve();
+
+    // Server closes before SessionStarted (e.g. auth rejection).
+    ws.serverClose(4001, 'auth failed');
+    await connectPromise.catch(() => {}); // the pending connect promise rejects
+
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(events).not.toContain('reconnecting');
+    expect(events).toContain('close');
+    expect(mockSockets.length).toBe(1); // no reconnect socket created
+  });
+
   it('does not reconnect when the user initiated the disconnect', async () => {
     // WHY: a user pressing Stop must end the session for good. Reconnecting
     // after an intentional disconnect would resurrect a session the user just
@@ -457,6 +489,91 @@ describe('VolcengineAST2Client reconnection', () => {
     await vi.advanceTimersByTimeAsync(110 * 60 * 1000);
 
     expect(mockSockets.length).toBeGreaterThan(socketsAfterConnect);
+  });
+
+  it('does not resurrect the session if the user disconnects while a reconnect handshake is in flight', async () => {
+    // WHY (finding 4): reconnect() awaits openTransport(); the resolution
+    // (SessionStarted) is queued as a microtask. If the user presses Stop during
+    // that window, disconnect() runs first (isDisconnecting=true, timers cleared,
+    // socket closed), then the reconnect continuation resumes and — without a
+    // re-check of isDisconnecting after the await — clears isReconnecting and
+    // fires onReconnected() on a session the user already killed, while
+    // handleSessionStarted's keepalive/pre-reconnect timers (installed during the
+    // handshake) survive disconnect's cleanup and keep the dead session alive.
+    vi.useFakeTimers();
+    const events: string[] = [];
+    const client = new VolcengineAST2Client('app-id', '', 'volc.service_type.10053');
+    client.setEventHandlers({
+      onReconnecting: () => events.push('reconnecting'),
+      onReconnected: () => events.push('reconnected'),
+      onClose: () => events.push('close'),
+    });
+
+    const ws1 = await connectAndStart(client);
+    ws1.serverClose(1006, 'abnormal'); // live session drops → reconnect scheduled
+    expect(events).toContain('reconnecting');
+
+    // Advance past the backoff so reconnect() runs and opens ws2; it is now
+    // awaiting openTransport() (the SessionStarted handshake).
+    await vi.advanceTimersByTimeAsync(5000);
+    const ws2 = lastSocket();
+    expect(ws2).not.toBe(ws1);
+    ws2.open();
+    await Promise.resolve();
+
+    // User presses Stop mid-handshake.
+    const disconnectPromise = client.disconnect();
+
+    // The handshake now completes — its resolution races the disconnect.
+    ws2.emitServerEvent(EventType.SessionStarted, { responseMeta: { StatusCode: 20000000 } });
+    await vi.advanceTimersByTimeAsync(0);
+    await disconnectPromise;
+
+    // The killed session must NOT be reported as reconnected.
+    expect(events).not.toContain('reconnected');
+
+    // And no leaked pre-reconnect timer should fire after the user stopped:
+    // advancing well past the 2h pre-reconnect threshold must not spawn a socket.
+    const socketCount = mockSockets.length;
+    await vi.advanceTimersByTimeAsync(120 * 60 * 1000);
+    expect(mockSockets.length).toBe(socketCount);
+  });
+
+  it('does not surface onError to the UI when a reconnect socket fails its handshake', async () => {
+    // WHY: a transparent reconnect must stay invisible to the user. onClose is
+    // already suppressed while isReconnecting; onError must be too. Without this,
+    // every reconnect socket that hits a network blip / rate-limit handshake
+    // failure fires onError, which MainPanel turns into an "api_error" system
+    // message — the user sees an error popup during what should be a silent
+    // reconnect. The handshake failure must still drive the reconnect loop
+    // (schedule another backoff retry) without ever touching onError.
+    vi.useFakeTimers();
+    const errors: Error[] = [];
+    const events: string[] = [];
+    const client = new VolcengineAST2Client('app-id', '', 'volc.service_type.10053');
+    client.setEventHandlers({
+      onError: (e) => errors.push(e),
+      onReconnecting: () => events.push('reconnecting'),
+      onClose: () => events.push('close'),
+    });
+
+    const ws1 = await connectAndStart(client);
+    ws1.serverClose(1006, 'abnormal'); // live session drops → reconnect scheduled
+    expect(events).toContain('reconnecting');
+
+    // Advance past the first backoff delay so reconnect() runs and opens a new
+    // socket (isReconnecting is true for the duration of the handshake).
+    await vi.advanceTimersByTimeAsync(5000);
+    const ws2 = lastSocket();
+    expect(ws2).not.toBe(ws1);
+
+    // The reconnect socket's handshake fails (onerror) before SessionStarted.
+    ws2.serverError();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // No error must have leaked to the UI during the transparent reconnect.
+    expect(errors).toEqual([]);
+    expect(events).not.toContain('close');
   });
 });
 
@@ -822,5 +939,46 @@ describe('VolcengineAST2Client TTS finalize', () => {
     releaseFlush!();
     for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(flushCalls).toBe(1);
+  });
+
+  it('falls back to whole-sentence playback when the streaming flush rejects, instead of dropping the sentence', async () => {
+    // WHY (finding 3): the flush branch of finishStreamingOrDecodeTTSAndPlay
+    // sets ttsSentenceFinalized=true BEFORE awaiting finishSentence(). If that
+    // await rejects, control skips both the hasEmittedAudio() short-circuit and
+    // the whole-sentence fallback, the buffered ttsChunks are never played, and
+    // TTSEnded then sees finalized=true and skips too — the entire sentence's
+    // dubbing goes silently missing. The flush must be guarded so a rejection
+    // still falls back to whole-sentence decode of the buffered chunks.
+    const updates: Array<{ delta?: any }> = [];
+    const client = new VolcengineAST2Client('app-id', '', 'volc.service_type.10053');
+    client.setEventHandlers({
+      onConversationUpdated: (data) => updates.push(data),
+    });
+
+    const ws = await connectAndStart(client);
+
+    // Inject a decoder whose finishSentence() REJECTS while reporting the
+    // streaming-live state (available=true, no audio emitted yet) so the client
+    // takes the 'flush' branch and hits the rejecting await.
+    (client as any).streamingTTSDecoder = {
+      startSentence: async () => {},
+      decodeChunk: async () => false,
+      finishSentence: async () => { throw new Error('flush exploded'); },
+      isAvailable: () => true,
+      hasEmittedAudio: () => false,
+      dispose: async () => {},
+    };
+
+    ws.emitServerEvent(EventType.TTSSentenceStart);
+    await Promise.resolve();
+    ws.emitServerEvent(EventType.TTSResponse, { data: new Uint8Array([1, 2, 3]) });
+    await Promise.resolve();
+
+    ws.emitServerEvent(EventType.TTSSentenceEnd);
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+
+    // The buffered chunk must still reach playback via the whole-sentence
+    // fallback — exactly one audio delta, not a silently dropped sentence.
+    expect(countAudioDeltas({ calls: updates })).toBe(1);
   });
 });

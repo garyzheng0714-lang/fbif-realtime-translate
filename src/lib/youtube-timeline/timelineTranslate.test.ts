@@ -198,6 +198,25 @@ describe('timelineTranslate', () => {
     expect(translated[1].translatedText).toBe('中文:world');
   });
 
+  // WHY: the worker pool writes `result.translatedText` into the result slot, and a
+  // jittery Bing reply can have translatedText === undefined (field missing), so the
+  // array handed to translateTimelineCueBatch is effectively `(string | undefined)[]`.
+  // Calling .trim() on undefined threw a TypeError that bubbled through
+  // translateCueWindow -> failTimeline and killed the whole session — the exact
+  // failure mode finding 9 set out to remove. An undefined reply must degrade to the
+  // same per-cue skip as a blank string, not crash the batch.
+  it('treats an undefined translation like a blank one (degrades, does not throw)', async () => {
+    const translator = {
+      // The runtime array is sparse/undefined-bearing even though the type says string[].
+      translateBatch: vi.fn(async () => [undefined, '中文:world'] as unknown as string[]),
+    };
+
+    const translated = await translateTimelineCueBatch(cues.slice(0, 2), translator, 'zh');
+
+    expect(translated[0].translatedText).toBeUndefined();
+    expect(translated[1].translatedText).toBe('中文:world');
+  });
+
   it('uses the injected translation engine in order without starting a real worker', async () => {
     const engine = {
       init: vi.fn(async () => ({ loadTimeMs: 1, device: 'mock' })),

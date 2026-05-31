@@ -16,20 +16,29 @@ function installContentScript() {
   let hostParent: unknown = null;
   let hostElement: any = null;
 
-  const makeParent = () => ({
-    appendChild: vi.fn((child: unknown) => {
-      if (child === hostElement) hostParent = null; // reset; set below
-    }),
-  });
+  // Model parentNode / isConnected so the re-parent guard can be exercised
+  // realistically. appendChild attaches the host (connected); a SPA that
+  // rebuilds the player subtree can detach it (orphaned) via detachHost().
+  const linkHostTo = (parent: any) => {
+    hostParent = parent;
+    if (hostElement) {
+      hostElement.parentNode = parent;
+      // The host is connected only when its parent is itself attached to the
+      // document tree. A detached/replaced player container is not connected.
+      hostElement.isConnected = parent ? !!parent.isConnected : false;
+    }
+  };
 
   const body: any = {
+    isConnected: true,
     appendChild: vi.fn((child: unknown) => {
-      if (child === hostElement) hostParent = body;
+      if (child === hostElement) linkHostTo(body);
     }),
   };
   const fullscreenElement: any = {
+    isConnected: true,
     appendChild: vi.fn((child: unknown) => {
-      if (child === hostElement) hostParent = fullscreenElement;
+      if (child === hostElement) linkHostTo(fullscreenElement);
     }),
   };
   const shadow = { appendChild: vi.fn() };
@@ -49,6 +58,8 @@ function installContentScript() {
         id: '',
         src: '',
         allow: '',
+        parentNode: null,
+        isConnected: false,
         style: {
           get cssText() {
             return tagName === 'iframe' ? iframeStyle : '';
@@ -59,7 +70,11 @@ function installContentScript() {
         },
         attachShadow: vi.fn(() => shadow),
         remove: vi.fn(() => {
-          if (element === hostElement) hostParent = null;
+          if (element === hostElement) {
+            hostParent = null;
+            element.parentNode = null;
+            element.isConnected = false;
+          }
         }),
       };
       // The first non-iframe div created is the host.
@@ -118,6 +133,32 @@ function installContentScript() {
       documentMock.fullscreenElement = null;
       fire(documentEventListeners, 'fullscreenchange');
     },
+    // Simulate YouTube's SPA rebuilding the player subtree while still in
+    // fullscreen: the player container the host was re-parented into is
+    // detached from the document, so the host is now an orphan (still pointing
+    // at that container via parentNode, but no longer connected to the page).
+    detachFullscreenPlayerSubtree() {
+      fullscreenElement.isConnected = false;
+      if (hostElement && hostElement.parentNode === fullscreenElement) {
+        hostElement.isConnected = false;
+      }
+    },
+    // The live player container reappears in the document (still the fullscreen
+    // element), but the host has not been re-appended yet, so it stays orphaned.
+    reattachFullscreenPlayerSubtree() {
+      fullscreenElement.isConnected = true;
+    },
+    // Fire fullscreenchange without changing which element is fullscreen (e.g.
+    // a redundant/secondary event while still in fullscreen).
+    fireFullscreenChangeStillFullscreen() {
+      fire(documentEventListeners, 'fullscreenchange');
+    },
+    isHostConnected() {
+      return !!(hostElement && hostElement.isConnected);
+    },
+    fullscreenAppendCount() {
+      return fullscreenElement.appendChild.mock.calls.length;
+    },
     getHostParent() {
       return hostParent;
     },
@@ -166,6 +207,38 @@ describe('subtitle overlay content script', () => {
     contentScript.enterFullscreen();
 
     expect(contentScript.isFullscreenParent(contentScript.getHostParent())).toBe(true);
+  });
+
+  // Why this matters: the re-parent guard `host.parentNode === target` skips
+  // re-attaching when the host already sits under the target. But YouTube's SPA
+  // can rebuild the #movie_player subtree mid-fullscreen, detaching the very
+  // container the host was moved into. The host's parentNode still points at
+  // that now-orphaned container (so the guard's `===` is satisfied) yet the host
+  // is no longer connected to the document — the subtitle overlay is invisible.
+  // The guard must also verify the host is still connected, re-attaching it to
+  // the live target when it has been orphaned, instead of early-returning and
+  // leaving it stranded.
+  it('re-attaches an orphaned host when the player subtree was rebuilt mid-fullscreen', () => {
+    const contentScript = installContentScript();
+    contentScript.enterSubtitleMode();
+    contentScript.enterFullscreen();
+    expect(contentScript.isFullscreenParent(contentScript.getHostParent())).toBe(true);
+    expect(contentScript.fullscreenAppendCount()).toBe(1);
+
+    // YouTube rebuilds the player subtree: the host's parent is detached, so the
+    // host is orphaned (parentNode still === fullscreenElement, but disconnected).
+    contentScript.detachFullscreenPlayerSubtree();
+    expect(contentScript.isHostConnected()).toBe(false);
+
+    // The live player container reappears (re-attached to the document) and a
+    // fullscreenchange fires while still fullscreen.
+    contentScript.reattachFullscreenPlayerSubtree();
+    contentScript.fireFullscreenChangeStillFullscreen();
+
+    // The guard must NOT early-return on the stale parentNode === target match;
+    // it must re-append the orphaned host so it becomes visible again.
+    expect(contentScript.fullscreenAppendCount()).toBe(2);
+    expect(contentScript.isHostConnected()).toBe(true);
   });
 
   it('moves the subtitle host back under document.body when fullscreen exits', () => {

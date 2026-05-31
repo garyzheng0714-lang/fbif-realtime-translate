@@ -493,7 +493,15 @@ export class VolcengineAST2Client implements IClient {
           const url = (event.target as WebSocket)?.url || WS_ENDPOINT;
           const error = new Error(`WebSocket connection to ${url} failed`);
           console.error('[VolcengineAST2Client] WebSocket error:', error.message);
-          this.eventHandlers.onError?.(error);
+          // During a transparent reconnect the failure must stay invisible to
+          // the user: onClose is already suppressed while isReconnecting (see
+          // below), so onError must be too, or every reconnect handshake blip
+          // pops an "api_error" message in MainPanel. The reject() still drives
+          // the reconnect loop's backoff retry — only the UI notification is
+          // suppressed.
+          if (!this.isReconnecting) {
+            this.eventHandlers.onError?.(error);
+          }
           reject(error);
         };
 
@@ -502,8 +510,6 @@ export class VolcengineAST2Client implements IClient {
           console.log('[VolcengineAST2Client] WebSocket closed:', event.code, event.reason);
           this.isConnectedState = false;
           this.stopKeepalive();
-
-          const closedBeforeSessionStarted = this.sessionStartedReject != null;
 
           // If the socket closes before SessionStarted, the pending connect (or
           // reconnect) promise is still waiting. Reject it now instead of letting
@@ -541,7 +547,10 @@ export class VolcengineAST2Client implements IClient {
           // silence timeout, push timeout, network blip) should be transparently
           // reconnected rather than torn down. Suppress onClose so MainPanel
           // keeps the session alive while we rebuild the connection.
-          if (!this.isDisconnecting && this.sessionEverStarted && !closedBeforeSessionStarted) {
+          // (sessionEverStarted===true implies the pending sessionStartedReject
+          // was already cleared in handleSessionStarted, so a separate
+          // "closed before session started" guard here is redundant.)
+          if (!this.isDisconnecting && this.sessionEverStarted) {
             this.scheduleReconnect();
             return;
           }
@@ -872,6 +881,14 @@ export class VolcengineAST2Client implements IClient {
   }
 
   // ─── Reconnection ──────────────────────────────────────────────────
+  /** Close and drop the current socket, ignoring any close error. */
+  private teardownSocket(): void {
+    if (this.websocket) {
+      try { this.websocket.close(); } catch { /* ignore */ }
+      this.websocket = null;
+    }
+  }
+
   private clearReconnectTimers(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -938,10 +955,7 @@ export class VolcengineAST2Client implements IClient {
     this.clearReconnectTimers();
 
     // Tear down any lingering socket from the dead connection.
-    if (this.websocket) {
-      try { this.websocket.close(); } catch { /* ignore */ }
-      this.websocket = null;
-    }
+    this.teardownSocket();
 
     // Fresh identifiers for the new connection.
     this.connectionId = uuidv4();
@@ -951,6 +965,22 @@ export class VolcengineAST2Client implements IClient {
 
     try {
       await this.openTransport();
+      // The user may have pressed Stop while we were awaiting the handshake.
+      // disconnect() runs synchronously before this continuation resumes, so
+      // re-check here: without it we would clear isReconnecting, fire
+      // onReconnected() on a session the user already killed, and leave the
+      // keepalive / pre-reconnect timers that handleSessionStarted just armed
+      // running against a dead session (resurrecting it 110min later). Tear the
+      // freshly-opened transport back down to match the disconnect intent.
+      if (this.isDisconnecting) {
+        this.clearReconnectTimers();
+        this.stopKeepalive();
+        // openTransport opened a fresh socket; disconnect() only closed the
+        // socket that existed at the time it ran, so close this new one too to
+        // avoid leaking it against a session the user already killed.
+        this.teardownSocket();
+        return;
+      }
       // Reached SessionStarted — connection is live again.
       this.isReconnecting = false;
       this.reconnectAttempts = 0;
@@ -1135,14 +1165,23 @@ export class VolcengineAST2Client implements IClient {
     this.ttsSentenceFinalized = true;
 
     if (action === 'flush' && streamingDecoder) {
-      await streamingDecoder.finishSentence();
-      if (streamingDecoder.hasEmittedAudio()) {
-        this.ttsChunks = [];
-        this.ttsSentenceTargetItemId = null;
-        return;
+      // ttsSentenceFinalized is already true, so TTSEnded will skip. If the
+      // flush rejects we must NOT let the rejection bubble out (it would skip
+      // the fallback below and silently drop the whole sentence's dubbing, with
+      // TTSEnded unable to recover). Swallow it and fall through to the
+      // whole-sentence decode of the buffered chunks instead.
+      try {
+        await streamingDecoder.finishSentence();
+        if (streamingDecoder.hasEmittedAudio()) {
+          this.ttsChunks = [];
+          this.ttsSentenceTargetItemId = null;
+          return;
+        }
+      } catch (error) {
+        console.warn('[VolcengineAST2Client] Streaming TTS flush rejected, falling back to whole-sentence decode:', error);
       }
     }
-    // 'whole-sentence', or a flush that produced nothing → decode the blob.
+    // 'whole-sentence', or a flush that produced nothing / rejected → decode the blob.
     await this.decodeTTSAndPlay();
   }
 

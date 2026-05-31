@@ -59,6 +59,32 @@ describe('detectSeek', () => {
     // the 1s tolerance, so it is jitter, not a seek.
     expect(detectSeek(5_000, 6_300, 1_000, opts)).toBe(false);
   });
+
+  // WHY: backward movement can NEVER be produced by forward playback, so any real
+  // rewind is a seek regardless of how far it went. The old code gated the backward
+  // branch on jumpToleranceMs (the FORWARD drift knob, 2000ms in production), so a
+  // user rewinding the scrubber by less than that — e.g. 1s — was NOT flagged. The
+  // dubbing pipeline then kept playing the pre-seek timeline against the rewound
+  // video, desyncing audio from picture. Backward detection must be independent of
+  // the forward tolerance, governed only by a tiny pure-jitter threshold.
+  it('flags a real backward rewind smaller than the forward jump tolerance', () => {
+    // jumpToleranceMs is 1000ms here; a 600ms rewind is below it but is still a
+    // genuine seek, not forward jitter.
+    expect(detectSeek(5_000, 4_400, 400, opts)).toBe(true);
+  });
+
+  it('still ignores sub-jitter negative noise in the video clock', () => {
+    // A tiny negative jitter (<= the backward jitter floor) is not a real rewind.
+    expect(detectSeek(5_000, 4_950, 400, opts)).toBe(false);
+  });
+
+  it('honours an explicit backwardToleranceMs override for the rewind floor', () => {
+    // With a 700ms backward floor a 600ms rewind is treated as jitter, while a
+    // 900ms rewind crosses it and is a seek — proving backward uses its own knob.
+    const tuned = { ...opts, backwardToleranceMs: 700 };
+    expect(detectSeek(5_000, 4_400, 400, tuned)).toBe(false);
+    expect(detectSeek(5_000, 4_100, 400, tuned)).toBe(true);
+  });
 });
 
 describe('classifyCuePlayback', () => {

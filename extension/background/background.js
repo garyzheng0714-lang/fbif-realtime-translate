@@ -198,13 +198,21 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
       await chrome.action.setPopup({ tabId: tabId, popup: '' });
       console.debug('[Sokuji] [Background] Maintaining side panel (onClicked mode) for supported site:', url.hostname);
     } else {
-      // Disable the side panel for THIS tab only. A global setOptions without a
-      // tabId mutates the default for every tab lacking an explicit per-tab
-      // option, which races with the per-tab enabled:true set for supported
-      // tabs and can blank out a panel that should be visible during fast tab
-      // switching. Scope the disable to the activated tabId instead.
+      // Clear the activated tab's own per-tab option so it carries no stale
+      // enabled:true override on a page we do not support.
       await chrome.sidePanel.setOptions({
         tabId: tabId,
+        enabled: false,
+      });
+      // Per-tab enabled:false alone does NOT reliably hide a side panel that is
+      // already visible in the window — Chrome keeps showing it until the panel
+      // path is re-resolved. When the user switches from a supported site (panel
+      // visible) to an unsupported one, force the visible panel closed with a
+      // global setOptions({ enabled:false }) (no tabId). Supported tabs are
+      // unaffected: each carries its own per-tab enabled:true override
+      // (re-applied on activation), which takes precedence over this global
+      // default, so a fast switch back re-shows their panel.
+      await chrome.sidePanel.setOptions({
         enabled: false,
       });
       await chrome.action.setPopup({ tabId: tabId, popup: 'popup.html' });

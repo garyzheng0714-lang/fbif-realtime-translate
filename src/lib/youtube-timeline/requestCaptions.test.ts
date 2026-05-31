@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   requestCaptions,
+  requestCaptionsFromTab,
   setYouTubeOriginalAudioMutedInTab,
   setYouTubeOriginalAudioMutedFromActiveTab,
   requestYouTubeVideoTimeFromActiveTab,
@@ -82,7 +83,7 @@ describe('requestCaptions', () => {
       sourceLanguage: 'en',
       cues: [
         {
-          id: 'yt-1000-2500-0',
+          id: 'yt-1000-Hello timeline',
           startMs: 1000,
           endMs: 2500,
           sourceText: 'Hello timeline',
@@ -119,6 +120,65 @@ describe('requestCaptions', () => {
     const result = await requestCaptions();
 
     expect(result.tabId).toBe(activeYouTubeTab.id);
+  });
+
+  // WHY (finding 1): the live-caption refresh loop must re-fetch from the EXACT
+  // tab the session pinned at start (timelineVideoTabIdRef), the same tab the tick
+  // polls video time from. The old refreshCaptions called the active-tab
+  // requestCaptions(), so if the user opened the same video in a second tab and
+  // switched to it, the 20s refresh merged captions from that second tab (possibly
+  // a different caption track / progress) while the tick still read time from the
+  // first tab — caption source and playhead source split. requestCaptionsFromTab
+  // sends straight to the pinned tab id and never queries the active tab.
+  it('fetches captions from a specific tab id without querying the active tab', async () => {
+    const { query, sendMessage } = installChromeMock({
+      ok: true,
+      payload: {
+        videoId: 'video-123',
+        title: 'Real video title',
+        sourceLanguage: 'en',
+        tracks: [],
+        json3: {
+          events: [
+            {
+              tStartMs: 1000,
+              dDurationMs: 1500,
+              segs: [{ utf8: 'Pinned tab caption' }],
+            },
+          ],
+        },
+      },
+    });
+
+    const result = await requestCaptionsFromTab(99);
+
+    expect(query).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      99,
+      { type: YOUTUBE_TIMELINE_CAPTION_REQUEST },
+      expect.any(Function),
+    );
+    expect(result).toMatchObject({
+      videoId: 'video-123',
+      cues: [{ startMs: 1000, endMs: 2500, sourceText: 'Pinned tab caption' }],
+    });
+  });
+
+  // WHY: the refresh loop already swallows caption fetch failures, but the tab-id
+  // path must still surface a real timeline error code (not a generic throw) so a
+  // future caller can distinguish a transient failure from a contract break.
+  it('preserves content script error codes from the tab-id caption path', async () => {
+    installChromeMock({
+      ok: false,
+      error: {
+        code: 'no_caption_tracks',
+        message: 'No caption tracks were found for this YouTube video.',
+      },
+    });
+
+    await expect(requestCaptionsFromTab(99)).rejects.toMatchObject({
+      code: 'no_caption_tracks',
+    });
   });
 
   it('uses v2 message types so stale listeners on already-open YouTube pages do not answer', () => {

@@ -449,6 +449,14 @@ function setOriginalAudioMuted(muted, expectedVideoId) {
     return makeError('no_video', 'No YouTube video element was found on this page.');
   }
 
+  // A snapshot already present at call entry means a session is in flight, so
+  // this call cannot be the session's first mute(true) capture. The caller
+  // drives restore by replaying the captured value, so a call that arrives
+  // with an existing snapshot AND sets the video back to exactly that snapshot
+  // value is the restore (a one-shot consume), regardless of whether that
+  // value is muted or unmuted.
+  const hadSnapshotBeforeCall = capturedOriginalMuted !== null;
+
   if (muted) {
     // Capture the pre-intervention state once, on the first mute of a session.
     if (capturedOriginalMuted === null) {
@@ -459,8 +467,11 @@ function setOriginalAudioMuted(muted, expectedVideoId) {
   const previousMuted = capturedOriginalMuted === null ? video.muted : capturedOriginalMuted;
   video.muted = muted;
 
-  if (!muted) {
+  if (hadSnapshotBeforeCall && muted === capturedOriginalMuted) {
     // Restore complete; clear the snapshot so the next session re-captures.
+    // This fires for an originally-unmuted restore (muted=false) AND an
+    // originally-muted restore (muted=true) — otherwise a stale `true` would
+    // leak into the next session and silence a video the user later un-muted.
     capturedOriginalMuted = null;
   }
 

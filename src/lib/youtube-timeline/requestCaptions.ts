@@ -77,6 +77,26 @@ function createTimelineError(code: TimelineErrorCode, message: string): Error & 
   return error;
 }
 
+/**
+ * Normalize any error caught from a timeline content-script request into a
+ * TimelineError. Every request wrapper (captions, video time, mute) repeated this
+ * exact three-way branch — pass through an already-coded Error, re-wrap a coded
+ * plain record, else fall back to caption_fetch_failed (finding 10). Centralizing
+ * it means a future error-code rule (a new code, a different fallback message)
+ * changes once instead of per-path, so the tick's failure handling can't diverge
+ * depending on which request threw.
+ */
+function normalizeTimelineRequestError(error: unknown, fallbackMessage: string): never {
+  if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
+    throw error;
+  }
+  if (isRecord(error) && isTimelineErrorCode(error.code)) {
+    throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
+  }
+  const message = error instanceof Error ? error.message : fallbackMessage;
+  throw createTimelineError('caption_fetch_failed', message);
+}
+
 function getChromeTabs(): { chromeApi: Chrome; tabs: ChromeTabsWithMessages } {
   const chromeApi = typeof chrome === 'undefined' ? undefined : chrome;
   const tabs = chromeApi?.tabs as ChromeTabsWithMessages | undefined;
@@ -389,14 +409,24 @@ export async function requestCaptions(): Promise<YouTubeTimelineResponse & { tab
     // active tab every frame.
     return { ...parseTimelineResponse(response, tab, videoId), tabId: tab.id! };
   } catch (error) {
-    if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
-      throw error;
-    }
-    if (isRecord(error) && isTimelineErrorCode(error.code)) {
-      throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
-    }
-    const message = error instanceof Error ? error.message : 'Failed to request captions';
-    throw createTimelineError('caption_fetch_failed', message);
+    normalizeTimelineRequestError(error, 'Failed to request captions');
+  }
+}
+
+export async function requestCaptionsFromTab(tabId: number): Promise<YouTubeTimelineResponse> {
+  // The session's tab is pinned once captions are first fetched, so the live
+  // caption-refresh loop must re-fetch from that exact tab id — the same tab the
+  // tick polls video time from. Querying the active tab here would merge captions
+  // from a different tab the user switched to mid-session (finding 1). There is no
+  // ChromeTab to fall back on, so title/videoId fall back to the payload values.
+  const { chromeApi, tabs } = getChromeTabs();
+  const placeholderTab = { title: undefined } as unknown as ChromeTab;
+
+  try {
+    const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tabId, { type: YOUTUBE_TIMELINE_CAPTION_REQUEST });
+    return parseTimelineResponse(response, placeholderTab, '');
+  } catch (error) {
+    normalizeTimelineRequestError(error, 'Failed to request captions');
   }
 }
 
@@ -407,14 +437,7 @@ export async function requestYouTubeVideoTimeFromActiveTab(): Promise<YouTubeVid
     const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tab.id!, { type: YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST });
     return parseVideoTimeResponse(response);
   } catch (error) {
-    if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
-      throw error;
-    }
-    if (isRecord(error) && isTimelineErrorCode(error.code)) {
-      throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
-    }
-    const message = error instanceof Error ? error.message : 'Failed to request YouTube video time';
-    throw createTimelineError('caption_fetch_failed', message);
+    normalizeTimelineRequestError(error, 'Failed to request YouTube video time');
   }
 }
 
@@ -429,14 +452,7 @@ export async function requestYouTubeVideoTimeFromTab(tabId: number): Promise<You
     const response = await sendTimelineRequestWithContentScriptRetry(chromeApi, tabs, tabId, { type: YOUTUBE_TIMELINE_VIDEO_TIME_REQUEST });
     return parseVideoTimeResponse(response);
   } catch (error) {
-    if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
-      throw error;
-    }
-    if (isRecord(error) && isTimelineErrorCode(error.code)) {
-      throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
-    }
-    const message = error instanceof Error ? error.message : 'Failed to request YouTube video time';
-    throw createTimelineError('caption_fetch_failed', message);
+    normalizeTimelineRequestError(error, 'Failed to request YouTube video time');
   }
 }
 
@@ -451,14 +467,7 @@ export async function setYouTubeOriginalAudioMutedFromActiveTab(muted: boolean):
     });
     return parseOriginalAudioMutedResponse(response, tab.id!, videoId);
   } catch (error) {
-    if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
-      throw error;
-    }
-    if (isRecord(error) && isTimelineErrorCode(error.code)) {
-      throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
-    }
-    const message = error instanceof Error ? error.message : 'Failed to set YouTube original audio muted state';
-    throw createTimelineError('caption_fetch_failed', message);
+    normalizeTimelineRequestError(error, 'Failed to set YouTube original audio muted state');
   }
 }
 
@@ -477,13 +486,6 @@ export async function setYouTubeOriginalAudioMutedInTab(
     });
     return parseOriginalAudioMutedResponse(response, tabId, expectedVideoId ?? '');
   } catch (error) {
-    if (error instanceof Error && isTimelineErrorCode((error as Error & { code?: unknown }).code)) {
-      throw error;
-    }
-    if (isRecord(error) && isTimelineErrorCode(error.code)) {
-      throw createTimelineError(error.code, typeof error.message === 'string' ? error.message : 'Timeline request failed');
-    }
-    const message = error instanceof Error ? error.message : 'Failed to set YouTube original audio muted state';
-    throw createTimelineError('caption_fetch_failed', message);
+    normalizeTimelineRequestError(error, 'Failed to set YouTube original audio muted state');
   }
 }

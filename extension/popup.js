@@ -430,24 +430,6 @@ function setupEventListeners(tabId, isSupported, currentHostname) {
 
 // Helper function to setup site item click handlers
 function setupSiteItemClickHandlers(isSupported, currentHostname) {
-  // Handle grouped site pill clicks
-  const pills = document.querySelectorAll('.site-group-pill');
-  pills.forEach(pill => {
-    const newPill = pill.cloneNode(true);
-    pill.parentNode.replaceChild(newPill, pill);
-    newPill.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const siteUrl = newPill.dataset.url;
-      trackEvent('extension_site_navigated', {
-        from_site: currentHostname || 'unknown',
-        to_site: siteUrl,
-        navigation_source: 'popup'
-      });
-      chrome.tabs.create({ url: `https://${siteUrl}` });
-      window.close();
-    });
-  });
-
   // Handle regular (non-grouped) site item clicks
   const siteItems = document.querySelectorAll('.site-item:not(.site-item-grouped)');
   siteItems.forEach(item => {

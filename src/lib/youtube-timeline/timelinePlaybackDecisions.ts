@@ -8,7 +8,17 @@ export interface DetectSeekOptions {
   // Minimum trustworthy wall-clock measurement. Below this we cannot tell a stall
   // from a seek, so we conservatively do NOT flag a seek (avoid teardown churn).
   minElapsedMs: number;
+  // Pure-jitter floor for BACKWARD movement. Backward motion cannot be produced by
+  // forward playback, so any rewind larger than this tiny floor is a real seek. This
+  // is intentionally independent of jumpToleranceMs (the forward-drift knob, ~2000ms
+  // in production): gating rewinds on the forward tolerance missed real sub-2s
+  // rewinds. Optional so existing callers keep the previous defaulted behaviour.
+  backwardToleranceMs?: number;
 }
+
+// Below this many ms of rewind we treat backward motion as video-clock jitter
+// rather than a deliberate scrub. Far smaller than the forward jump tolerance.
+const DEFAULT_BACKWARD_TOLERANCE_MS = 250;
 
 /**
  * Decide whether the video position moved because the user scrubbed (a real
@@ -36,11 +46,12 @@ export function detectSeek(
 
   const advance = currVideoTimeMs - prevVideoTimeMs;
 
-  // Backward movement is never produced by forward playback -> always a seek.
+  // Backward movement is never produced by forward playback -> always a seek,
+  // gated only by a tiny pure-jitter floor (NOT the forward jumpToleranceMs, which
+  // is large in production and used to swallow real sub-2s rewinds).
   if (advance < 0) {
-    // ...but only if we trust the measurement enough to act. A tiny negative
-    // jitter inside tolerance is still just jitter.
-    if (-advance > opts.jumpToleranceMs) return true;
+    const backwardToleranceMs = opts.backwardToleranceMs ?? DEFAULT_BACKWARD_TOLERANCE_MS;
+    if (-advance > backwardToleranceMs) return true;
   }
 
   // Without a trustworthy elapsed measurement we cannot distinguish a stall from

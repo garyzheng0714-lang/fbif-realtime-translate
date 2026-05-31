@@ -1352,8 +1352,31 @@ export class ModernBrowserAudioService implements IAudioService {
    */
   public stopTabAudioRecordingSync(): void {
     if (!this.tabAudioRecordingActive) return;
-    this.tabAudioRecorder?.requestStopCaptureSync();
+
+    // Capture the recorder locally, then null the field BEFORE doing anything
+    // async. stopTabAudioRecording() gates recorder.end() on this.tabAudioRecorder
+    // being non-null (not on the active flag), so leaving the reference dangling
+    // would let a later async teardown (e.g. React unmount after a bfcache
+    // restore -> disconnectConversation -> stopTabAudioRecording) double-stop the
+    // same recorder: a second end() plus a redundant STOP_TAB_CAPTURE. Tearing
+    // the state down fully here keeps the sync path symmetric with the async one
+    // and prevents isTabAudioRecordingActive() from masking a surviving recorder.
+    const recorder = this.tabAudioRecorder;
+    this.tabAudioRecorder = null;
+    this.tabAudioCallback = null;
     this.tabAudioRecordingActive = false;
+
+    if (recorder) {
+      // Synchronously tell the background to stop the Chrome tabCapture (the
+      // actual source of original-audio suppression); fire-and-forget is enough
+      // because STOP_TAB_CAPTURE is idempotent and pagehide will not await.
+      recorder.requestStopCaptureSync();
+      // Also stop the local capture so no MediaStream track keeps running if the
+      // page survives in bfcache. end() is async and pagehide cannot await it,
+      // so this is best-effort on the local track; the synchronous
+      // requestStopCaptureSync above already guarantees the background stop.
+      void recorder.end().catch(() => {});
+    }
   }
 
   // ============================================

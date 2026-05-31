@@ -78,6 +78,7 @@ import FbifSimplePanel from './FbifSimplePanel';
 import useTimelineStore, { useTimelineActiveCueId, useTimelineCues, useTimelineError, useTimelineStatus } from '../../stores/timelineStore';
 import {
   requestCaptions,
+  requestCaptionsFromTab,
   requestYouTubeVideoTimeFromTab,
   setYouTubeOriginalAudioMutedInTab,
   setYouTubeOriginalAudioMutedFromActiveTab,
@@ -99,7 +100,7 @@ import {
 } from '../../lib/youtube-timeline/timelinePlaybackDecisions';
 import { mergeNewCues } from '../../lib/youtube-timeline/timelineCaptionMerge';
 import { getTimelineUserMessage } from '../../lib/youtube-timeline/timelineErrors';
-import { decideStreamingCueAction } from '../../lib/youtube-timeline/timelineStreamingPlayback';
+import { decideStreamingCueAction, decideTickErrorAction, resolvePrepareCueOutcome } from '../../lib/youtube-timeline/timelineStreamingPlayback';
 import type { TimelineCue } from '../../lib/youtube-timeline/types';
 
 
@@ -952,6 +953,11 @@ const MainPanel: React.FC<MainPanelProps> = () => {
   // instead of re-querying the active tab every 350ms (and risking a different
   // tab if the user switches away mid-session).
   const timelineVideoTabIdRef = useRef<number | null>(null);
+  // Count of back-to-back tick errors. A transient video-time poll failure (a
+  // buffering NaN, a one-off chrome.runtime timeout) is swallowed and retried
+  // next tick instead of killing the session; only a fatal error, or this counter
+  // exceeding its budget, escalates to failTimeline (finding 3).
+  const timelineConsecutiveTickErrorsRef = useRef<number>(0);
 
   // Reference to track push-to-talk duration
   const pushToTalkStartTimeRef = useRef<number | null>(null);
@@ -1243,6 +1249,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
     timelineQueuedCueIdsRef.current.clear();
     timelineLastVideoTimeMsRef.current = null;
     timelineLastTickWallClockMsRef.current = null;
+    timelineConsecutiveTickErrorsRef.current = 0;
     timelineFailedCueIdsRef.current.clear();
     timelineVideoTabIdRef.current = null;
     timelineTranslatorRef.current?.dispose();
@@ -1469,6 +1476,29 @@ const MainPanel: React.FC<MainPanelProps> = () => {
 
         timelineGeneratingCueIdsRef.current.add(cue.id);
 
+        // Settle the prepared-audio bookkeeping once generation ends. A cue that
+        // completed with ZERO chunks (non-blank text, empty edge-tts audio) is
+        // poisoned so it is never re-sent every tick (finding 2); a cue that
+        // FAILED after already starting playback is flagged done so the tick drains
+        // its tail and deletes the entry instead of leaking it (finding 5).
+        const settlePreparedCue = (outcome: 'completed' | 'failed') => {
+          if (timelineQueuedCueIdsRef.current.has(cue.id)) return;
+          const entry = timelinePreparedAudioRef.current.get(cue.id);
+          const resolution = resolvePrepareCueOutcome(outcome, {
+            hasPreparedEntry: entry !== undefined,
+            started: entry?.started ?? false,
+          });
+          if (resolution.markGenerationDone && entry) {
+            entry.generationDone = true;
+          }
+          if (resolution.deletePrepared) {
+            timelinePreparedAudioRef.current.delete(cue.id);
+          }
+          if (resolution.markFailed) {
+            timelineFailedCueIdsRef.current.add(cue.id);
+          }
+        };
+
         try {
           await tts.generateChinese(cue.translatedText, (chunk) => {
             // Stream each chunk into this cue's buffer the moment it is produced,
@@ -1489,14 +1519,8 @@ const MainPanel: React.FC<MainPanelProps> = () => {
             }
           });
 
-          // Generation finished: flag the entry as done so the tick can finish and
-          // retire the cue once its tail has drained. If no chunk ever arrived (a
-          // blank/empty TTS result) or the cue was dropped, there is no entry to flag.
-          if (isTimelineSessionActive() && !timelineQueuedCueIdsRef.current.has(cue.id)) {
-            const entry = timelinePreparedAudioRef.current.get(cue.id);
-            if (entry) {
-              entry.generationDone = true;
-            }
+          if (isTimelineSessionActive()) {
+            settlePreparedCue('completed');
           }
         } catch (error) {
           if (error instanceof Error && error.message === 'Timeline TTS disposed') {
@@ -1506,7 +1530,7 @@ const MainPanel: React.FC<MainPanelProps> = () => {
           // session-fatal failTimeline (findings 9 / 15). Only escalate if the
           // error class is genuinely unrecoverable for the whole session.
           if (isTimelineSessionActive()) {
-            timelineFailedCueIdsRef.current.add(cue.id);
+            settlePreparedCue('failed');
             if (shouldFailTimeline(error)) {
               throw error;
             }
@@ -1613,8 +1637,15 @@ const MainPanel: React.FC<MainPanelProps> = () => {
       // unavailable mid-stream). The whole loop is gated by the session generation.
       const refreshCaptions = async (): Promise<void> => {
         if (!isTimelineSessionActive()) return;
+        // Re-fetch from the SAME tab the session pinned at start (the tick's
+        // video-time source), not the active tab. Using the active tab would merge
+        // captions from a different tab the user switched to mid-session — a
+        // possibly different caption track/progress — while the tick still reads
+        // playhead time from the pinned tab, splitting the two sources (finding 1).
+        const videoTabId = timelineVideoTabIdRef.current;
+        if (videoTabId === null) return;
         try {
-          const { cues: fetchedCues, videoId: fetchedVideoId } = await requestCaptions();
+          const { cues: fetchedCues, videoId: fetchedVideoId } = await requestCaptionsFromTab(videoTabId);
           if (!isTimelineSessionActive()) return;
           // A different video id means the user navigated away; the seek/video-id
           // guards in the tick own that transition, so just skip this refresh.
@@ -1635,13 +1666,46 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         }, captionRefreshMs);
       };
 
+      // Budget of back-to-back tick errors before a transient fault is treated as
+      // permanent. ~5 ticks at 350ms ≈ 1.75s of failed polls — long enough to ride
+      // out a buffering hiccup, short enough that a truly dead tab fails loud.
+      const maxConsecutiveTickErrors = 5;
+
       const tick = async (): Promise<void> => {
         const videoTabId = timelineVideoTabIdRef.current;
         // tabId is set right after requestCaptions succeeds, before the first
         // tick is ever scheduled, so a null here means the session was torn down.
         if (videoTabId === null) return;
-        const videoTime = await requestYouTubeVideoTimeFromTab(videoTabId);
+
+        // The video-time poll is the one per-tick call that can throw for a
+        // TRANSIENT reason (a buffering NaN currentTime, a one-off chrome.runtime
+        // timeout, the content script mid-reinjection). The old tick had no
+        // try/catch, so any such throw bubbled to tick().catch(failTimeline) and
+        // killed the whole session on the first blip. Swallow a recoverable error
+        // and retry next tick; only a fatal error or an exhausted retry budget
+        // escalates (finding 3).
+        let videoTime: Awaited<ReturnType<typeof requestYouTubeVideoTimeFromTab>>;
+        try {
+          videoTime = await requestYouTubeVideoTimeFromTab(videoTabId);
+        } catch (error) {
+          if (!isTimelineSessionActive()) return;
+          timelineConsecutiveTickErrorsRef.current += 1;
+          const action = decideTickErrorAction(
+            error,
+            timelineConsecutiveTickErrorsRef.current,
+            maxConsecutiveTickErrors,
+          );
+          if (action === 'fail') {
+            failTimeline(error);
+            return;
+          }
+          scheduleTick(tick);
+          return;
+        }
         if (!isTimelineSessionActive()) return;
+        // A clean poll clears the streak so isolated blips never accumulate toward
+        // the budget across an otherwise-healthy session.
+        timelineConsecutiveTickErrorsRef.current = 0;
 
         if (videoTime.videoId !== timelineResponse.videoId) {
           failTimeline(new Error(switchedVideoMessage));
@@ -1669,10 +1733,6 @@ const MainPanel: React.FC<MainPanelProps> = () => {
         timelineLastVideoTimeMsRef.current = currentTimeMs;
         timelineLastTickWallClockMsRef.current = nowWallClockMs;
 
-        const timelineCues = getTranslatedTimelineCues();
-        const activeCue = getActiveCue(timelineCues, currentTimeMs);
-        setTimelinePlaying(activeCue?.id ?? null);
-
         for (const [cueId, prepared] of timelinePreparedAudioRef.current) {
           // Drop a cue whose window has fully passed only if it never started
           // playing. A cue that already started streaming keeps its entry so its
@@ -1683,13 +1743,25 @@ const MainPanel: React.FC<MainPanelProps> = () => {
           }
         }
 
-        // Process the nearest cues first so the caption about to play wins the
-        // translate/TTS pools over far-future cues in the same window (finding 18).
-        // getCueWindow preserves the (already start-sorted) cue order, but sort
-        // defensively so the priority is explicit and independent of caller order.
-        const cueWindow = getCueWindow(timelineCues, currentTimeMs, prebufferMs)
+        // Only the cues near the playhead need their translated text resolved, so
+        // window first (against the raw, already-start-sorted cues) and resolve
+        // just that window. The old code mapped the WHOLE list through the
+        // translation map every 350ms — N allocations per tick on a long video —
+        // then scanned the full list again for the active cue and the window
+        // (findings 12 / 13). Process the nearest cues first so the caption about
+        // to play wins the translate/TTS pools over far-future ones (finding 18);
+        // sort defensively so the priority is explicit and independent of caller order.
+        const cueWindow = resolveTranslatedCues(
+          getCueWindow(timelineResponse.cues, currentTimeMs, prebufferMs),
+          timelineTranslatedCueMapRef.current,
+        )
           .slice()
           .sort((a, b) => a.startMs - b.startMs);
+        // The active cue (startMs <= now < endMs) is always a subset of the window
+        // (endMs > now && startMs <= now + prebuffer), so take it from the resolved
+        // window instead of re-scanning the full cue list (finding 13).
+        const activeCue = getActiveCue(cueWindow, currentTimeMs);
+        setTimelinePlaying(activeCue?.id ?? null);
         const escalateIfFatal = (error: unknown) => {
           if (generation !== timelineSessionGenerationRef.current) return;
           if (error instanceof Error && error.message === 'Timeline translation disposed') return;

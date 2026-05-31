@@ -104,9 +104,12 @@ export async function translateTimelineCueBatch(
   // is normal jitter, and throwing would bubble through translateCueWindow ->
   // failTimeline and stop the whole session. Leaving translatedText untouched (undefined)
   // makes getTimelineCuesToTranslate re-select the cue on a later window for a retry.
+  // A jittery worker reply can also be `undefined` (missing translatedText field), so
+  // the array is effectively (string | undefined)[]; treat undefined exactly like a
+  // blank string rather than calling .trim() on it and throwing a TypeError.
   return cues.map((cue, index) => {
     const translatedText = translatedTexts[index];
-    if (translatedText.trim() === '') {
+    if (translatedText === undefined || translatedText.trim() === '') {
       return cue;
     }
     return { ...cue, translatedText };

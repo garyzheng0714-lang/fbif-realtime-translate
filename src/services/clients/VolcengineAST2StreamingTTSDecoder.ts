@@ -54,15 +54,21 @@ export class VolcengineAST2StreamingTTSDecoder {
   }
 
   async startSentence(): Promise<void> {
-    // Chain the reset onto the existing operationQueue instead of discarding it,
-    // so the previous sentence's decode/flush against the shared decoder fully
-    // completes before this sentence resets that same decoder. Resetting the
-    // availability flags inside the serial chain keeps them ordered relative to
-    // the previous sentence's last emit, avoiding a state race on the shared
-    // WASM decoder that would clip the previous sentence's tail audio.
+    // Reset the availability flags SYNCHRONOUSLY: the client calls this
+    // fire-and-forget on TTSSentenceStart and then reads isAvailable() /
+    // hasEmittedAudio() synchronously on TTSSentenceEnd to classify the
+    // sentence. Queuing the flag reset behind a still-pending previous-sentence
+    // operation would make those reads see the previous sentence's stale state
+    // (e.g. available=false after a decode failure, emittedAudio=true), so the
+    // new sentence gets misclassified as an already-played failed sentence and
+    // its dubbing is dropped.
+    this.available = true;
+    this.emittedAudio = false;
+    // The decoder.reset() itself stays on the serial operationQueue so the
+    // previous sentence's decode/flush against the shared WASM decoder fully
+    // completes before this sentence resets that same decoder — otherwise the
+    // reset could wipe state mid-flush and clip the previous sentence's tail.
     await this.enqueue(async () => {
-      this.available = true;
-      this.emittedAudio = false;
       const decoder = await this.getDecoder();
       await decoder.reset?.();
     });

@@ -223,12 +223,10 @@ describe('background tab capture streamId lifecycle', () => {
 });
 
 describe('background side panel visibility on tab switch', () => {
-  it('disables the side panel per-tab (not the global default) when switching to an unsupported site', async () => {
-    // WHY: a global setOptions({ enabled: false }) with no tabId mutates the
-    // default for every tab that has no explicit per-tab option. That races
-    // with the per-tab enabled:true written for supported tabs, so fast tab
-    // switching can blank out a panel that should be showing. Scoping the
-    // disable to the activated tabId avoids clobbering other tabs.
+  it('disables the side panel for the activated unsupported tab so it does not keep an enabled override', async () => {
+    // WHY: the activated unsupported tab must not be left with an enabled:true
+    // override, or its own side panel would stay openable on a page we do not
+    // support. The per-tab disable scoped to the activated tabId clears that.
     const bg = installBackground({
       knownTabs: [11],
       tabUrls: { 11: 'https://example.com/page' },
@@ -237,10 +235,60 @@ describe('background side panel visibility on tab switch', () => {
     bg.setOptions.mockClear();
     await bg.fireTabActivated(11);
 
-    expect(bg.setOptions).toHaveBeenCalled();
-    for (const call of bg.setOptions.mock.calls) {
+    const perTabDisable = bg.setOptions.mock.calls.find((call) => {
       const arg = call[0];
-      expect(arg).toMatchObject({ tabId: 11, enabled: false });
-    }
+      return arg && arg.tabId === 11 && arg.enabled === false;
+    });
+    expect(perTabDisable).toBeTruthy();
+  });
+
+  // WHY: per-tab `enabled:false` alone does NOT reliably hide a side panel that
+  // is already visible in the window (Chrome keeps showing it until the panel
+  // path is re-resolved). When the user switches from a supported site (panel
+  // visible) to an unsupported one, the panel must actually disappear, not keep
+  // floating over the unsupported page. A global setOptions({ enabled:false })
+  // (no tabId) forces the visible panel closed. Dropping it — as a prior change
+  // did, keeping only the per-tab disable — reintroduces a panel that lingers on
+  // unsupported pages. Supported tabs are unaffected: each carries its own
+  // per-tab enabled:true override (re-applied on activation), which takes
+  // precedence over the global default.
+  it('forces the visible panel closed with a global disable when switching to an unsupported site', async () => {
+    const bg = installBackground({
+      knownTabs: [11],
+      tabUrls: { 11: 'https://example.com/page' },
+    });
+
+    bg.setOptions.mockClear();
+    await bg.fireTabActivated(11);
+
+    const globalDisable = bg.setOptions.mock.calls.find((call) => {
+      const arg = call[0];
+      return arg && arg.enabled === false && !('tabId' in arg);
+    });
+    expect(globalDisable).toBeTruthy();
+  });
+
+  it('keeps the side panel enabled per-tab when switching to a supported site', async () => {
+    // WHY: the global disable must be confined to the unsupported branch. A
+    // supported tab must still get its per-tab enabled:true so its panel opens.
+    const bg = installBackground({
+      knownTabs: [11],
+      tabUrls: { 11: 'https://www.youtube.com/watch?v=abc' },
+    });
+
+    bg.setOptions.mockClear();
+    await bg.fireTabActivated(11);
+
+    const perTabEnable = bg.setOptions.mock.calls.find((call) => {
+      const arg = call[0];
+      return arg && arg.tabId === 11 && arg.enabled === true;
+    });
+    expect(perTabEnable).toBeTruthy();
+    // No global disable on the supported path.
+    const globalDisable = bg.setOptions.mock.calls.find((call) => {
+      const arg = call[0];
+      return arg && arg.enabled === false && !('tabId' in arg);
+    });
+    expect(globalDisable).toBeUndefined();
   });
 });

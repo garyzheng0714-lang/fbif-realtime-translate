@@ -85,7 +85,13 @@
   function onFullscreenChange() {
     if (!host) return;
     const target = document.fullscreenElement || document.body;
-    if (host.parentNode === target) return;
+    // Skip the re-parent only when the host already sits under the target AND is
+    // still connected to the document. YouTube's SPA can rebuild the
+    // #movie_player subtree mid-fullscreen, detaching the container the host was
+    // moved into: parentNode still === target (a now-orphaned node), so a bare
+    // `=== target` guard would early-return and leave the overlay stranded
+    // off-document. Requiring isConnected forces a re-append in that case.
+    if (host.parentNode === target && host.isConnected) return;
     target.appendChild(host);
   }
 
