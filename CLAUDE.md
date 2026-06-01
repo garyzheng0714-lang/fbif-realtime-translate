@@ -331,3 +331,36 @@ useSettingsStore.subscribe(
 - **ApiKeyService**: Handles fetching API keys from backend with caching
 - **AuthContext**: Manages authentication state and token lifecycle (Better Auth)
 - **Service Integration**: All AI clients check authentication before operations
+
+## FBIF Fork — Real-time Translation (this fork's customizations)
+
+This fork (origin: `garyzheng0714-lang/fbif-realtime-translate`) adds real-time
+translation of in-page video audio (YouTube / Bilibili / live) for FBIF internal
+use. Two independent pipelines:
+
+- **Path A — Volcengine Doubao AST 2.0 s2s** (`src/services/clients/VolcengineAST2Client.ts`):
+  tab audio frames → Volcengine WebSocket → voice-cloned EN→ZH dubbing + subtitles.
+  Doubao constraints: must keep-alive with silent frames during real silence or it
+  hits a 45000081 timeout; 2h per-connection hard cap; 30min idle disconnect. The
+  client has exponential-backoff auto-reconnect + pre-reconnect before the 2h cap.
+- **Path B — YouTube timeline** (`src/lib/youtube-timeline/*` + `MainPanel.tsx`
+  `startTimelineConversation` closure): fetch YouTube captions → schedule on the
+  video timeline → Bing text translation → edge-tts dubbing + overlay subtitles.
+  Path B needs no Volcengine key.
+
+Conventions / gotchas (so the next session doesn't re-discover them the hard way):
+- **Run tests serially**: `npx vitest run --no-file-parallelism`. Parallel runs
+  have timer-race flakes; serial is the source of truth (`npm test` = vitest).
+- **tsc is NOT a CI gate here**: the fork inherits ~131 pre-existing baseline type
+  errors (unused vars, event-type unions). When checking your own change, diff tsc
+  output against the baseline — never read the absolute count as "your" errors.
+- MainPanel timeline scheduling lives entirely inside the `startTimelineConversation`
+  useCallback closure and is not directly unit-testable. Pure decision logic is
+  extracted to `src/lib/youtube-timeline/{timelinePlaybackDecisions,
+  timelineStreamingPlayback,timelineCaptionMerge}.ts` and tested there — keep new
+  scheduling decisions as pure functions, wire-only in MainPanel.
+- Extension build: `cd extension && npm run build` → `extension/dist/`.
+
+The full audit (62 findings), the 6-wave TDD fix history, two code-review passes,
+and the documented known-residual items live in the agent memory note
+`project-fbif-realtime-translate`.
